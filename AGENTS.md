@@ -8,6 +8,14 @@ Letty on Linux kernel 3.10.0 and glibc 2.17 with X11 forwarding to a remote
 X server or VDI desktop. This fork owns its compatibility and performance
 changes locally.
 
+- **Use an upstream stable release as the baseline.** This maintenance
+  branch starts at upstream `v0.6.4`
+  (`f34d980944843a7c3054698d304ba22a5041fc42`). Keep downstream changes on
+  top of that release; do not merge upstream `main` as routine maintenance.
+  When upgrading, select and record a newer stable release, review the
+  release-to-release changes, and revalidate the supported target.
+  Consumers must pin a full fork commit SHA rather than a moving branch
+  or tag, and verify the downloaded source archive hash.
 - **Upstream synchronization is one-way: upstream → this fork.** Import
   upstream changes here; do not push this fork's commits or branches to
   upstream, open upstream pull requests, or otherwise submit downstream
