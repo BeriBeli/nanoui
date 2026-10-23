@@ -1,5 +1,51 @@
 # AGENTS.md
 
+## Fork purpose and upstream policy
+
+This repository is the downstream [BeriBeli/nanoui](https://github.com/BeriBeli/nanoui)
+fork of [justrach/nanoui](https://github.com/justrach/nanoui), maintained for
+Letty on Linux kernel 3.10.0 and glibc 2.17 with X11 forwarding to a remote
+X server or VDI desktop. This fork owns its compatibility and performance
+changes locally.
+
+- **Upstream synchronization is one-way: upstream → this fork.** Import
+  upstream changes here; do not push this fork's commits or branches to
+  upstream, open upstream pull requests, or otherwise submit downstream
+  changes back to upstream. Local fork changes do not need to be prepared
+  for upstream contribution.
+- `origin` is the fork; `upstream` is the source for incoming changes only.
+  Inspect remote URLs before any network write. A configured upstream push
+  URL does not authorize pushing there. Fork pushes and releases still
+  require authorization from the current task.
+- When asked to synchronize upstream, review incoming changes and merge
+  them into the fork while preserving downstream fixes and this policy.
+  Resolve conflicts in favor of the fork's compatibility requirements;
+  adapt incompatible upstream changes instead of silently raising the
+  supported baseline. Do not reset away local changes or rewrite shared
+  history as part of routine synchronization.
+- Preserve the Letty delivery target `x86_64-linux.3.10-gnu.2.17`, baseline
+  CPU and ReleaseSafe. Do not introduce mandatory newer kernel/glibc APIs,
+  CPU extensions, or newer runtime libraries without an explicit change to
+  the support policy. Kernel/glibc compatibility alone does not establish
+  compatibility with the target GTK, GLib, Cairo or X server.
+- Prioritize X11 forwarding: efficient CPU rendering, retained backing
+  pixels, dirty-region presentation, scrolling, fewer allocations, and
+  bounded memory and caches. Avoid unnecessary full-window repainting,
+  X11 traffic and synchronous round trips. The forwarded path must work
+  without a local GPU or accelerated remote OpenGL.
+- X11 carries the application's GUI to the remote X server. This fork's
+  purpose does not require a terminal-state mirror, daemon or custom
+  remote-display protocol.
+- Validate rendering correctness and measure changes with representative
+  X11 forwarding workloads. Cross-builds, ABI checks, local GPU benchmarks
+  and Xvfb tests do not establish real Linux 3.10/glibc 2.17, X11/VDI, IME
+  or remote scrolling acceptance. Record the environment and limitations.
+- Keep maintained documentation in English and preserve upstream license
+  notices. These fork-specific rules take precedence over imported
+  upstream guidance when they conflict.
+
+## Framework overview
+
 nanoui is a desktop application framework in Zig 0.17, after
 [mygo](https://github.com/egoist/mygo). Windows show either a web page in the
 system webview (WKWebView, macOS only for now) with typed Zig ↔ TypeScript
@@ -27,7 +73,7 @@ and Zig's lib fixed (`tools/ios/zig-lib.sh`).
   comptime), C frameworks (CoreText, CoreGraphics, Metal, ImageIO,
   libdispatch) and Win32 through `extern` declarations, GTK through
   `dlopen`/`dlsym` (`src/linux/gtk.zig`). No `@cImport`, no `.c`/`.m`.
-- **Every platform keeps building.** After a change, build for Linux and
+- **Every platform keeps building.** After a code change, build for Linux and
   Windows too (`zig build -Dtarget=aarch64-linux-gnu --prefix zig-out/linux`,
   `-Dtarget=x86_64-windows-gnu`), and iOS
   (`zig build $(sh tools/ios/zig-lib.sh) -Dtarget=aarch64-ios-simulator`), and run the
