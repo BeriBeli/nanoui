@@ -233,6 +233,53 @@ pub inline fn clipCover(i: *const gpu.Instance, wx: f32, wy: f32, inv: f32) f32 
 }
 
 fn quad(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
+    // Default unfocused-pane overlays can be completely transparent. A visible
+    // border must still render even when the fill itself contributes nothing.
+    if (i.color[3] == 0 and (i.border_width <= 0 or i.border_color[3] == 0)) return;
+    // Opaque interiors replace the destination. Keep rounded edges, borders
+    // and rounded clips on the scalar path, with exactly its pixel geometry.
+    if (i.color[3] != 1 or i.clip_round > 0) return quadScalar(out, i, scale, b);
+    for (i.color[0..3]) |v| if (v < 0 or v > 1) return quadScalar(out, i, scale, b);
+    const has_border = i.border_width > 0 and i.border_color[3] > 0;
+    const radius = @min(i.radius, @min(i.rect[2], i.rect[3]) * 0.5);
+    const inset = @max(radius, if (has_border) i.border_width else 0) + 2 / scale;
+    // Round inward conservatively; every covered pixel center is strictly
+    // inside the scalar kernel's solid rectangle, even at fractional scales.
+    const inside: [4]usize = .{
+        @intFromFloat(std.math.clamp(@ceil((i.rect[0] + inset) * scale), @as(f32, @floatFromInt(b[0])), @as(f32, @floatFromInt(b[2])))),
+        @intFromFloat(std.math.clamp(@ceil((i.rect[1] + inset) * scale), @as(f32, @floatFromInt(b[1])), @as(f32, @floatFromInt(b[3])))),
+        @intFromFloat(std.math.clamp(@floor((i.rect[0] + i.rect[2] - inset) * scale), @as(f32, @floatFromInt(b[0])), @as(f32, @floatFromInt(b[2])))),
+        @intFromFloat(std.math.clamp(@floor((i.rect[1] + i.rect[3] - inset) * scale), @as(f32, @floatFromInt(b[1])), @as(f32, @floatFromInt(b[3])))),
+    };
+    if (inside[2] <= inside[0] or inside[3] <= inside[1]) return quadScalar(out, i, scale, b);
+    // Recheck the endpoint centers with the scalar expression. This also
+    // protects very large/offscreen coordinates from f32 cancellation.
+    inline for (0..2) |axis| {
+        const half = i.rect[axis + 2] * 0.5;
+        const center = i.rect[axis] + half;
+        const first = (@as(f32, @floatFromInt(inside[axis])) + 0.5) * (1 / scale);
+        const last = (@as(f32, @floatFromInt(inside[axis + 2] - 1)) + 0.5) * (1 / scale);
+        if (@abs(first - center) >= half - inset or @abs(last - center) >= half - inset) return quadScalar(out, i, scale, b);
+    }
+    // Use blend's conversion, including its f32 +0.5 rounding, verbatim.
+    const pixel: [4]u8 = .{
+        @intFromFloat(@min(255, i.color[2] * 255 + 0.5)),
+        @intFromFloat(@min(255, i.color[1] * 255 + 0.5)),
+        @intFromFloat(@min(255, i.color[0] * 255 + 0.5)),
+        255,
+    };
+    for (inside[1]..inside[3]) |y| {
+        const row = out.bytes[(y * out.width + inside[0]) * 4 ..][0 .. (inside[2] - inside[0]) * 4];
+        @memset(std.mem.bytesAsSlice(u32, row), @bitCast(pixel));
+    }
+    // Disjoint strips preserve one blend per edge pixel and damage scissoring.
+    if (inside[1] > b[1]) quadScalar(out, i, scale, .{ b[0], b[1], b[2], inside[1] });
+    if (inside[3] < b[3]) quadScalar(out, i, scale, .{ b[0], inside[3], b[2], b[3] });
+    if (inside[0] > b[0]) quadScalar(out, i, scale, .{ b[0], inside[1], inside[0], inside[3] });
+    if (inside[2] < b[2]) quadScalar(out, i, scale, .{ inside[2], inside[1], b[2], inside[3] });
+}
+
+fn quadScalar(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
     const hw = i.rect[2] * 0.5;
     const hh = i.rect[3] * 0.5;
     const cx = i.rect[0] + hw;
@@ -272,6 +319,35 @@ fn quad(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
             blend(out.bytes, row + x * 4, col[0] * a, col[1] * a, col[2] * a, a);
         }
     }
+}
+
+test "opaque interior fill matches scalar blending including fractional clipped edges" {
+    const a = std.testing.allocator;
+    const actual = try a.alloc(u8, 160 * 100 * 4);
+    defer a.free(actual);
+    const expected = try a.alloc(u8, actual.len);
+    defer a.free(expected);
+    const out: gpu.Pixels = .{ .bytes = actual, .width = 160, .height = 100 };
+    const reference: gpu.Pixels = .{ .bytes = expected, .width = 160, .height = 100 };
+    for ([_]f32{ 0.75, 1, 1.25, 2 }) |scale| for ([_]f32{ 0, 3.25, 20 }) |radius| for ([_]f32{ 0, 1.3 }) |border| for (0..10) |variant| {
+        const i: gpu.Instance = .{
+            .rect = if (variant == 1) .{ -9.3, -4.7, 112.8, 67.2 } else if (variant == 2) .{ 7.3, 5.7, 4.2, 3.3 } else .{ 7.3, 5.7, 112.8, 67.2 },
+            .color = .{ if (variant == 3) 0.0019607842 else 0.94, 0.12745097, 0.6, if (variant >= 8) 0 else if (variant == 4) 0.6 else 1 },
+            .radius = radius,
+            .border_width = border,
+            .border_color = .{ 0.8, 0.2, 0.1, if (variant == 8) 0 else 0.7 },
+            .clip = .{ 2.4, 3.8, 126.7, 84.9 },
+            .clip_round = if (variant == 5) gpu.clipRound(9, 15) else 0,
+        };
+        const b = bounds(out, &i, scale) orelse continue;
+        const clipped: [4]usize = if (variant == 6) .{ @max(b[0], 36), @max(b[1], 24), @min(b[2], 86), @min(b[3], 51) } else if (variant == 7) .{ b[0], b[1], @min(b[2], b[0] + 1), b[3] } else b;
+        if (clipped[2] <= clipped[0] or clipped[3] <= clipped[1]) continue;
+        for (actual, 0..) |*v, at| v.* = @truncate(at * 37);
+        @memcpy(expected, actual);
+        quad(out, &i, scale, clipped);
+        quadScalar(reference, &i, scale, clipped);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    };
 }
 
 /// The atlas sampled as Metal's linear filter with clamped edges does.
