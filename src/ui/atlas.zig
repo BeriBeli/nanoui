@@ -6,6 +6,7 @@ const objc = @import("../objc.zig");
 const cf = @import("cf.zig");
 const types = @import("types.zig");
 
+extern "c" fn CTFontGetSymbolicTraits(cf.CTFontRef) u32;
 extern "c" fn CTFontGetBoundingRectsForGlyphs(font: cf.CTFontRef, orientation: u32, glyphs: [*]const u16, rects: ?[*]objc.CGRect, count: cf.CFIndex) objc.CGRect;
 extern "c" fn CTFontDrawGlyphs(font: cf.CTFontRef, glyphs: [*]const u16, positions: [*]const objc.CGPoint, count: usize, ctx: cf.CGContextRef) void;
 extern "c" fn CGContextDrawImage(ctx: cf.CGContextRef, rect: objc.CGRect, image: *anyopaque) void;
@@ -48,6 +49,8 @@ pub const Atlas = struct {
     /// are then stale: the frame must be painted again.
     reset_during_frame: bool = false,
     pixels: std.ArrayList(u8) = .empty,
+    last_raster_error: ?[]const u8 = null,
+    needs_texture: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, device: objc.Object) Atlas {
         return .{ .gpa = gpa, .device = device, .texture = makeTexture(device, initial_size) };
@@ -66,8 +69,6 @@ pub const Atlas = struct {
     fn makeRoom(a: *Atlas) void {
         if (a.size < max_size) {
             a.size *= 2;
-            objc.release(a.texture);
-            a.texture = makeTexture(a.device, a.size);
         }
         a.reset();
         a.reset_during_frame = true;
@@ -87,6 +88,7 @@ pub const Atlas = struct {
     }
 
     pub fn reset(a: *Atlas) void {
+        a.needs_texture = true;
         a.sprites.clearRetainingCapacity();
         a.symbols.clearRetainingCapacity();
         a.shelf_x = 0;
@@ -101,7 +103,7 @@ pub const Atlas = struct {
         const key: Key = .{ .font = font_id, .glyph = g, .bin = bin };
         if (a.sprites.get(key)) |sp| return sp;
         const sp = a.rasterize(font, g, bin);
-        a.sprites.put(a.gpa, key, sp) catch {};
+        if (!a.needs_texture) a.sprites.put(a.gpa, key, sp) catch {};
         return sp;
     }
 
@@ -126,20 +128,31 @@ pub const Atlas = struct {
 
         a.pixels.resize(a.gpa, w * h) catch return null;
         @memset(a.pixels.items, 0);
-        const ctx = cf.CGBitmapContextCreate(a.pixels.items.ptr, w, h, 8, w, null, cf.image_alpha_only) orelse return null;
-        defer cf.CGContextRelease(ctx);
-        cf.CGContextSetShouldAntialias(ctx, true);
-        cf.CGContextSetShouldSmoothFonts(ctx, false);
-        cf.CGContextSetAllowsFontSubpixelPositioning(ctx, true);
-        cf.CGContextSetShouldSubpixelPositionFonts(ctx, true);
-        cf.CGContextSetGrayFillColor(ctx, 1, 1);
-        // The glyph's origin, in pixels from the bitmap's bottom left.
-        CGContextTranslateCTM(ctx, @as(f64, pad) - x0 + sub, @as(f64, pad) - y0);
-        cf.CGContextScaleCTM(ctx, s, s);
-        const at = [1]objc.CGPoint{.{}};
-        CTFontDrawGlyphs(font, &glyphs, &at, 1, ctx);
+        if (CTFontGetSymbolicTraits(font) & (1 << 13) != 0) {
+            // The color font's alpha alone is a filled silhouette. Convert
+            // premultiplied luminance to ink so eyes/highlights survive R8.
+            const mask = @import("glyph_mask_mac.zig").draw(a.gpa, font, g, w, h, s, .{ .x = @as(f64, pad) - x0 + sub, .y = @as(f64, pad) - y0 }) catch |err| {
+                a.last_raster_error = @errorName(err);
+                return null;
+            };
+            defer a.gpa.free(mask);
+            @memcpy(a.pixels.items, mask);
+        } else {
+            const ctx = cf.CGBitmapContextCreate(a.pixels.items.ptr, w, h, 8, w, null, cf.image_alpha_only) orelse return null;
+            defer cf.CGContextRelease(ctx);
+            cf.CGContextSetShouldAntialias(ctx, true);
+            cf.CGContextSetShouldSmoothFonts(ctx, false);
+            cf.CGContextSetAllowsFontSubpixelPositioning(ctx, true);
+            cf.CGContextSetShouldSubpixelPositionFonts(ctx, true);
+            cf.CGContextSetGrayFillColor(ctx, 1, 1);
+            // The glyph's origin, in pixels from the bitmap's bottom left.
+            CGContextTranslateCTM(ctx, @as(f64, pad) - x0 + sub, @as(f64, pad) - y0);
+            cf.CGContextScaleCTM(ctx, s, s);
+            const at = [1]objc.CGPoint{.{}};
+            CTFontDrawGlyphs(font, &glyphs, &at, 1, ctx);
+        }
 
-        a.upload(origin, w, h);
+        if (!a.upload(origin, w, h)) return null;
         const as: f32 = @floatFromInt(a.size);
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(h);
@@ -164,7 +177,7 @@ pub const Atlas = struct {
         const key: SymbolKey = .{ .name = std.hash.Wyhash.hash(0, name), .size_bits = @bitCast(point_size), .weight = weight };
         if (a.symbols.get(key)) |sp| return sp;
         const sp = a.rasterizeSymbol(name, point_size, weight);
-        a.symbols.put(a.gpa, key, sp) catch {};
+        if (!a.needs_texture) a.symbols.put(a.gpa, key, sp) catch {};
         return sp;
     }
 
@@ -211,7 +224,7 @@ pub const Atlas = struct {
         }
         a.pixels.resize(a.gpa, bw * bh) catch return null;
         for (a.pixels.items, 0..) |*m, i| m.* = rgba[i * 4 + 3];
-        a.upload(origin, bw, bh);
+        if (!a.upload(origin, bw, bh)) return null;
         const as: f32 = @floatFromInt(a.size);
         const p: f32 = @as(f32, pad) / scale;
         return .{
@@ -231,6 +244,7 @@ pub const Atlas = struct {
     /// The atlas's texels, read back from the GPU: for the CPU renderer's
     /// test against the Metal renderer.
     pub fn read(a: *Atlas, gpa: std.mem.Allocator) ![]u8 {
+        if (a.needs_texture) return error.AtlasNotReady;
         const Region = extern struct { x: usize, y: usize, z: usize, w: usize, h: usize, d: usize };
         const bytes = try gpa.alloc(u8, @as(usize, a.size) * a.size);
         objc.msg(void, a.texture, "getBytes:bytesPerRow:fromRegion:mipmapLevel:", .{
@@ -239,11 +253,24 @@ pub const Atlas = struct {
         return bytes;
     }
 
-    fn upload(a: *Atlas, origin: [2]u32, w: u32, h: u32) void {
+    fn upload(a: *Atlas, origin: [2]u32, w: u32, h: u32) bool {
+        if (a.needs_texture) {
+            const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{ @as(objc.NSUInteger, 10), @as(objc.NSUInteger, a.size), @as(objc.NSUInteger, a.size), objc.NO });
+            const fresh = objc.msg(?objc.Object, a.device, "newTextureWithDescriptor:", .{desc}) orelse {
+                a.last_raster_error = "GlyphTextureAllocation";
+                return false;
+            };
+            // Standard Metal command buffers retain the old texture while
+            // any submitted frame still references its previous coordinates.
+            objc.release(a.texture);
+            a.texture = fresh;
+            a.needs_texture = false;
+        }
         const Region = extern struct { x: usize, y: usize, z: usize, w: usize, h: usize, d: usize };
         objc.msg(void, a.texture, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
             Region{ .x = origin[0], .y = origin[1], .z = 0, .w = w, .h = h, .d = 1 }, @as(objc.NSUInteger, 0), @as(*const anyopaque, a.pixels.items.ptr), @as(objc.NSUInteger, w),
         });
+        return true;
     }
 
     fn allocate(a: *Atlas, w: u32, h: u32) ?[2]u32 {

@@ -186,6 +186,7 @@ pub const Surface = struct {
         self.ctx.input.shift = w.GetKeyState(0x10) < 0;
         self.ctx.input.cmd = false;
         self.ctx.input.ctrl = w.GetKeyState(0x11) < 0;
+        self.ctx.input.alt = w.GetKeyState(0x12) < 0;
     }
 
     /// The window procedure's part for native UI; null for messages it
@@ -243,15 +244,17 @@ pub const Surface = struct {
                     self.frame();
                 }
             },
-            w.WM_LBUTTONDOWN, w.WM_LBUTTONDBLCLK => {
+            w.WM_LBUTTONDOWN, w.WM_LBUTTONDBLCLK, 0x0204, 0x0206, 0x0207, 0x0209 => {
+                self.ctx.input.mouse_button = if (msg == 0x0204 or msg == 0x0206) 2 else if (msg == 0x0207 or msg == 0x0209) 3 else 1;
                 _ = w.SetCapture(h);
                 self.setMouse(lp);
-                self.ctx.input.click_count = if (msg == w.WM_LBUTTONDBLCLK) 2 else 1;
+                self.ctx.input.click_count = if (msg == w.WM_LBUTTONDBLCLK or msg == 0x0206 or msg == 0x0209) 2 else 1;
                 self.ctx.updateHot();
                 self.ctx.pointerDown();
                 self.frame();
             },
-            w.WM_LBUTTONUP => {
+            w.WM_LBUTTONUP, 0x0205, 0x0208 => {
+                self.ctx.input.mouse_button = if (msg == 0x0205) 2 else if (msg == 0x0208) 3 else 1;
                 _ = w.ReleaseCapture();
                 self.setMouse(lp);
                 self.ctx.updateHot();
@@ -269,6 +272,7 @@ pub const Surface = struct {
                     self.ctx.updateHot();
                 } else if (self.ctx.wants_wheel) {
                     self.ctx.input.scroll = .{ .y = delta };
+                    self.ctx.input.scroll_lines = notches;
                     self.frame();
                 }
             },
@@ -302,7 +306,7 @@ pub const Surface = struct {
             0x1B => .escape,
             0x21 => .page_up,
             0x22 => .page_down,
-            0x70...0x7B => @enumFromInt(@intFromEnum(ctx_mod.Key.f1) + (vk - 0x70)),
+            0x70...0x7B => @fromBackingInt(@intCast(@backingInt(ctx_mod.Key.f1) + (vk - 0x70))),
             else => null,
         };
         const S = ui.Shortcut;

@@ -235,7 +235,11 @@ fn makeItem(t: MenuItem, app_name: []const u8) objc.Object {
         if (accel.len == 0) accel = info.accel;
         action = info.action;
     }
-    const parsed = parseAccelerator(accel);
+    var parsed = parseAccelerator(accel);
+    // AppKit matches the shifted character, so Cmd+Shift+P needs "P".
+    // Keep the shared accelerator parser's platform-neutral key lowercase.
+    if (parsed.mods & mod_shift != 0 and parsed.key >= 'a' and parsed.key <= 'z')
+        parsed.key = std.ascii.toUpper(@intCast(parsed.key));
     var key_buf: [8]u8 = undefined;
     const key = parsed.keyString(&key_buf);
     const ns = objc.msg(objc.Object, objc.alloc("NSMenuItem"), "initWithTitle:action:keyEquivalent:", .{

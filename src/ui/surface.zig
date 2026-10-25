@@ -145,37 +145,28 @@ pub const Surface = struct {
     /// Builds, lays out, paints and draws one frame.
     /// The atlas texture the renderer samples: CoreText's, or the one
     /// nanoui's own text rasterized into memory, uploaded when it changed.
-    fn atlasTexture(self: *Surface) objc.Object {
+    fn atlasTexture(self: *Surface) !objc.Object {
         if (!text.portable) return self.text.texture();
         const a = &self.text.atlas;
-        const Region = extern struct { x: usize, y: usize, z: usize, w: usize, h: usize, d: usize };
+        if (self.atlas_generation == a.generation and self.atlas_texture != null) return self.atlas_texture.?;
         const side: usize = a.size;
-        if (self.atlas_texture) |t| if (objc.msg(objc.NSUInteger, t, "width", .{}) != side) {
-            objc.release(t);
-            self.atlas_texture = null;
-        };
-        if (self.atlas_texture == null) {
-            const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{
-                @as(objc.NSUInteger, 10), side, side, objc.NO, // R8Unorm
-            });
-            self.atlas_texture = objc.msg(objc.Object, self.renderer.device, "newTextureWithDescriptor:", .{desc});
-            self.atlas_generation = std.math.maxInt(u64);
-        }
-        const t = self.atlas_texture.?;
-        if (self.atlas_generation != a.generation) {
-            objc.msg(void, t, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
-                Region{ .x = 0, .y = 0, .z = 0, .w = side, .h = side, .d = 1 }, @as(objc.NSUInteger, 0), @as(*const anyopaque, a.pixels.ptr), side,
-            });
-            self.atlas_generation = a.generation;
-        }
-        return t;
+        const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{ @as(objc.NSUInteger, 10), side, side, objc.NO });
+        const fresh = objc.msg(?objc.Object, self.renderer.device, "newTextureWithDescriptor:", .{desc}) orelse return error.GlyphTextureAllocation;
+        const Region = extern struct { x: usize, y: usize, z: usize, w: usize, h: usize, d: usize };
+        objc.msg(void, fresh, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
+            Region{ .x = 0, .y = 0, .z = 0, .w = side, .h = side, .d = 1 }, @as(objc.NSUInteger, 0), @as(*const anyopaque, a.pixels.ptr), side,
+        });
+        if (self.atlas_texture) |old| objc.release(old);
+        self.atlas_texture = fresh;
+        self.atlas_generation = a.generation;
+        return fresh;
     }
 
     pub fn frame(self: *Surface) void {
         // Nothing to show while hidden (another Space, covered, minimized):
         // the frame runs once the window is visible again. The first frame
         // runs at once, so the window opens with its content drawn.
-        if (self.ctx.frame > 0 and !self.visible()) {
+        if (self.ctx.frame > 0 and !self.visible() and !self.window.app.flags.hidden) {
             self.pending = true;
             self.setPaced(false);
             return;
@@ -192,7 +183,12 @@ pub const Surface = struct {
         @import("../play.zig").paint(self.gpa, &self.instances);
         self.renderer.syncImages(&self.text.images);
         self.renderer.textures = c.textures.items;
-        self.renderer.draw(self.instances.items, self.atlasTexture(), self.size, c.theme.background);
+        const atlas = self.atlasTexture() catch |err| {
+            self.text.last_shape_error = @errorName(err);
+            self.setPaced(false);
+            return;
+        };
+        self.renderer.draw(self.instances.items, atlas, self.size, c.theme.background);
         self.updateCursor();
         // Something moved under a still pointer, or a value is animating.
         const more = c.animating or r.hot_changed;
@@ -285,26 +281,33 @@ pub const Surface = struct {
 extern "c" const NSRunLoopCommonModes: objc.Object;
 
 const view_methods = [_]objc.Method{
-                .{ .name = "isFlipped", .imp = &yes, .types = "c@:" },
-                .{ .name = "acceptsFirstResponder", .imp = &yes, .types = "c@:" },
-                .{ .name = "acceptsFirstMouse:", .imp = &yes1, .types = "c@:@" },
-                .{ .name = "mouseDown:", .imp = &mouseDown, .types = "v@:@" },
-                .{ .name = "mouseUp:", .imp = &mouseUp, .types = "v@:@" },
-                .{ .name = "mouseDragged:", .imp = &mouseDragged, .types = "v@:@" },
-                .{ .name = "mouseMoved:", .imp = &mouseMoved, .types = "v@:@" },
-                .{ .name = "mouseExited:", .imp = &mouseExited, .types = "v@:@" },
-                .{ .name = "scrollWheel:", .imp = &scrollWheel, .types = "v@:@" },
-                .{ .name = "magnifyWithEvent:", .imp = &magnify, .types = "v@:@" },
-                .{ .name = "keyDown:", .imp = &keyDown, .types = "v@:@" },
-                .{ .name = "paste:", .imp = &paste, .types = "v@:@" },
-                .{ .name = "setFrameSize:", .imp = &setFrameSize, .types = "v@:{CGSize=dd}" },
-                .{ .name = "displayLayer:", .imp = &displayLayer, .types = "v@:@" },
-                .{ .name = "viewDidChangeBackingProperties", .imp = &backingChanged, .types = "v@:" },
-                .{ .name = "viewDidChangeEffectiveAppearance", .imp = &backingChanged, .types = "v@:" },
-                .{ .name = "updateTrackingAreas", .imp = &updateTrackingAreas, .types = "v@:" },
-                .{ .name = "displayLinkFired:", .imp = &displayLinkFired, .types = "v@:@" },
-                .{ .name = "viewWillStartLiveResize", .imp = &liveResizeStart, .types = "v@:" },
-                .{ .name = "viewDidEndLiveResize", .imp = &liveResizeEnd, .types = "v@:" },
+    .{ .name = "isFlipped", .imp = &yes, .types = "c@:" },
+    .{ .name = "acceptsFirstResponder", .imp = &yes, .types = "c@:" },
+    .{ .name = "acceptsFirstMouse:", .imp = &yes1, .types = "c@:@" },
+    .{ .name = "mouseDown:", .imp = &mouseDown, .types = "v@:@" },
+    .{ .name = "mouseUp:", .imp = &mouseUp, .types = "v@:@" },
+    .{ .name = "mouseDragged:", .imp = &mouseDragged, .types = "v@:@" },
+    .{ .name = "mouseMoved:", .imp = &mouseMoved, .types = "v@:@" },
+    .{ .name = "mouseExited:", .imp = &mouseExited, .types = "v@:@" },
+    .{ .name = "scrollWheel:", .imp = &scrollWheel, .types = "v@:@" },
+    .{ .name = "magnifyWithEvent:", .imp = &magnify, .types = "v@:@" },
+    .{ .name = "keyDown:", .imp = &keyDown, .types = "v@:@" },
+    .{ .name = "paste:", .imp = &paste, .types = "v@:@" },
+    .{ .name = "setFrameSize:", .imp = &setFrameSize, .types = "v@:{CGSize=dd}" },
+    .{ .name = "displayLayer:", .imp = &displayLayer, .types = "v@:@" },
+    .{ .name = "viewDidChangeBackingProperties", .imp = &backingChanged, .types = "v@:" },
+    .{ .name = "viewDidChangeEffectiveAppearance", .imp = &backingChanged, .types = "v@:" },
+    .{ .name = "updateTrackingAreas", .imp = &updateTrackingAreas, .types = "v@:" },
+    .{ .name = "displayLinkFired:", .imp = &displayLinkFired, .types = "v@:@" },
+    .{ .name = "viewWillStartLiveResize", .imp = &liveResizeStart, .types = "v@:" },
+    .{ .name = "viewDidEndLiveResize", .imp = &liveResizeEnd, .types = "v@:" },
+    .{ .name = "rightMouseDown:", .imp = &mouseDown, .types = "v@:@" },
+    .{ .name = "rightMouseUp:", .imp = &mouseUp, .types = "v@:@" },
+    .{ .name = "rightMouseDragged:", .imp = &mouseDragged, .types = "v@:@" },
+    .{ .name = "otherMouseDown:", .imp = &mouseDown, .types = "v@:@" },
+    .{ .name = "otherMouseUp:", .imp = &mouseUp, .types = "v@:@" },
+    .{ .name = "otherMouseDragged:", .imp = &mouseDragged, .types = "v@:@" },
+    .{ .name = "flagsChanged:", .imp = &flagsChanged, .types = "v@:@" },
 } ++ textinput.methods;
 
 fn surfaceOf(obj: objc.Object) ?*Surface {
@@ -319,14 +322,15 @@ fn yes1(_: objc.Object, _: objc.SEL, _: ?objc.Object) callconv(.c) objc.BOOL {
     return objc.YES;
 }
 
-fn mouseDown(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
+fn mouseDown(obj: objc.Object, selector: objc.SEL, event: objc.Object) callconv(.c) void {
     const s = surfaceOf(obj) orelse return;
+    s.ctx.input.mouse_button = if (selector == objc.sel("rightMouseDown:") or selector == objc.sel("rightMouseUp:")) 2 else if (selector == objc.sel("otherMouseDown:") or selector == objc.sel("otherMouseUp:")) 3 else 1;
     _ = objc.msg(objc.BOOL, s.window.nswindow, "makeFirstResponder:", .{obj});
     s.setMouse(event);
     s.ctx.updateHot();
     s.ctx.input.click_count = @intCast(objc.msg(objc.NSInteger, event, "clickCount", .{}));
     // Under a hidden title bar, the top strip moves the window as a title bar would.
-    if (s.window.title_bar == .hidden and s.ctx.input.mouse.y < s.ctx.title_bar_height and s.ctx.hot == 0) {
+    if (s.ctx.input.mouse_button == 1 and s.window.title_bar == .hidden and s.ctx.input.mouse.y < s.ctx.title_bar_height and s.ctx.hot == 0) {
         if (s.ctx.input.click_count == 2) s.window.zoom() else objc.msg(void, s.window.nswindow, "performWindowDragWithEvent:", .{event});
         return;
     }
@@ -334,8 +338,9 @@ fn mouseDown(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) voi
     s.frame();
 }
 
-fn mouseUp(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
+fn mouseUp(obj: objc.Object, selector: objc.SEL, event: objc.Object) callconv(.c) void {
     const s = surfaceOf(obj) orelse return;
+    s.ctx.input.mouse_button = if (selector == objc.sel("rightMouseDown:") or selector == objc.sel("rightMouseUp:")) 2 else if (selector == objc.sel("otherMouseDown:") or selector == objc.sel("otherMouseUp:")) 3 else 1;
     s.setMouse(event);
     s.ctx.updateHot();
     s.ctx.pointerUp();
@@ -375,13 +380,18 @@ fn mouseExited(obj: objc.Object, _: objc.SEL, _: objc.Object) callconv(.c) void 
 fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
     const s = surfaceOf(obj) orelse return;
     s.setMouse(event);
-    var dy: f32 = @floatCast(objc.msg(f64, event, "scrollingDeltaY", .{}));
-    if (!objc.msg(objc.BOOL, event, "hasPreciseScrollingDeltas", .{})) dy *= 12;
-    if (s.ctx.applyScroll(dy)) {
+    const precise = objc.msg(objc.BOOL, event, "hasPreciseScrollingDeltas", .{});
+    const lines = @import("input.zig").macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaY", .{})), precise);
+    const factor: f32 = if (precise) 1 else 12;
+    const dy = lines * factor;
+    const dx = @import("input.zig").macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaX", .{})), precise) * factor;
+    if (dy != 0 and s.ctx.applyScroll(dy)) {
         s.frame();
         s.ctx.updateHot();
     } else if (s.ctx.wants_wheel) {
-        s.ctx.input.scroll = .{ .y = dy };
+        s.ctx.input.scroll = .{ .x = dx, .y = dy };
+        s.ctx.input.scroll_lines = if (precise) null else lines;
+        s.ctx.input.scroll_started = objc.msg(objc.NSUInteger, event, "phase", .{}) & 1 != 0;
         s.frame();
     }
 }
@@ -391,6 +401,16 @@ fn magnify(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void 
     const s = surfaceOf(obj) orelse return;
     s.setMouse(event);
     s.ctx.input.zoom = @floatCast(@max(0.1, 1 + objc.msg(f64, event, "magnification", .{})));
+    s.frame();
+}
+
+fn flagsChanged(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
+    const s = surfaceOf(obj) orelse return;
+    const flags = objc.msg(objc.NSUInteger, event, "modifierFlags", .{});
+    s.ctx.input.cmd = flags & (1 << 20) != 0;
+    s.ctx.input.ctrl = flags & (1 << 18) != 0;
+    s.ctx.input.shift = flags & (1 << 17) != 0;
+    s.ctx.input.alt = flags & (1 << 19) != 0;
     s.frame();
 }
 
