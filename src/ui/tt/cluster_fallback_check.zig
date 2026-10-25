@@ -289,16 +289,22 @@ test "arbitrary font probes stop at budget and newly loaded coverage invalidates
 test "real pinned OpenSans and CJK TrueType sources retain exact data and cluster coverage" {
     var db = database();
     defer db.deinit();
-    const latin = "vendor/harfbuzz/test/api/fonts/OpenSans-Regular.ttf";
-    const cjk = "vendor/harfbuzz/test/api/fonts/Mplus1p-Regular.660E,6975,73E0,5EA6,8F38,6E05.ttf";
-    db.addFile(latin);
-    db.addFile(cjk);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const latin = @embedFile("testdata/OpenSans-Regular.ttf");
+    const original = @embedFile("testdata/Mplus1p-Regular.660E,6975,73E0,5EA6,8F38,6E05.ttf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "latin.ttf", .data = latin });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cjk.ttf", .data = original });
+    const latin_path = try tmp.dir.realPathFileAlloc(std.testing.io, "latin.ttf", a);
+    defer a.free(latin_path);
+    const cjk_path = try tmp.dir.realPathFileAlloc(std.testing.io, "cjk.ttf", a);
+    defer a.free(cjk_path);
+    db.addFile(latin_path);
+    db.addFile(cjk_path);
     try std.testing.expectEqual(@as(usize, 2), db.faces.items.len);
     try std.testing.expectEqual(@as(u32, 0), db.clusterFace(0, "e\xcc\x81", 400, false).?);
     try std.testing.expectEqual(@as(u32, 1), db.clusterFace(0, "明", 400, false).?);
     try std.testing.expect(db.load(0).?.glyphIndex('明') == 0);
-    const original = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, cjk, a, .limited(dbmod.Limits.source_bytes));
-    defer a.free(original);
     const source = db.source(1).?;
     try std.testing.expectEqualSlices(u8, original, source.bytes);
     try std.testing.expect(source.bytes.ptr == db.load(1).?.data.ptr);
@@ -381,10 +387,11 @@ test "large coverage misses release private candidates keep negative caches and 
     }
     try std.testing.expectEqual(probes, db.stats().probe_releases);
     try std.testing.expectEqual(@as(usize, 2), db.stats().lookup_entries);
-    // This is the actual installed Times font on macOS; other hosts use the
-    // pinned real OpenSans source. The previous broken implementation retained
-    // missing candidates until 128MiB and could not admit this new font.
-    const path = if (@import("builtin").os.tag == .macos) "/System/Library/Fonts/Supplemental/Times New Roman.ttf" else "vendor/harfbuzz/test/api/fonts/OpenSans-Regular.ttf";
+    // Use the same immutable real font on every host. Missing candidates must
+    // release their private snapshots so this new face still fits the budget.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real.ttf", .data = @embedFile("testdata/OpenSans-Regular.ttf") });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "real.ttf", a);
+    defer a.free(path);
     const next: u32 = @intCast(db.faces.items.len);
     db.addFile(path);
     try std.testing.expectEqual(next + 1, @as(u32, @intCast(db.faces.items.len)));

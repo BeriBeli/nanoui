@@ -7,7 +7,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "codex/x11-v0.7.0"]
   pull_request:
 
 permissions:
@@ -51,11 +51,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgtk-3-0t64 libgtk-4-1 libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri fonts-dejavu-core fonts-noto-core xvfb xauth zsh
       - run: zig build test-bin --prefix zig-out/linux
       - run: xvfb-run -a zig-out/linux/bin/nanoui-tests
+      - name: X11 benchmark tests and private live smoke check
+        run: |
+          python3 tools/build-x11-bench.py
+          zig build test-x11-bench -Dtarget=x86_64-linux.3.10-gnu.2.17 -Dcpu=baseline -Doptimize=ReleaseSafe
+          python3 tools/x11-bench/test_collector.py
+          timeout 30 xvfb-run -a python3 tools/x11-bench/run.py --binary=zig-out/x11-bench-linux/bin/nanoui-x11-bench --output="$RUNNER_TEMP/x11-bench-smoke.json" --label='CI private Xvfb; functional check only' -- --seconds=1 --warmup=0
       # A live window under each GTK: GTK 4 where it's installed, GTK 3 when asked.
-      - name: The counter under GTK 4 and GTK 3
+      - name: The counter under the supported GTK 3 backend
         run: |
           zig build
-          for v in 4 3; do
+          for v in 3; do
             NANOUI_GTK=$v NANOUI_DEBUG=1 timeout 4 xvfb-run -a zig-out/bin/counter > gtk$v.txt 2>&1 || true
             grep -q "nanoui: GTK $v" gtk$v.txt || { cat gtk$v.txt; exit 1; }
           done

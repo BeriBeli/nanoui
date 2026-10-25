@@ -12,3 +12,7 @@ codedb.snapshot
 .DS_Store
 zig-pkg/
 hillclimb/zig-pkg/
+
+__pycache__/
+*.pyc
+hillclimb/zig-pkg/

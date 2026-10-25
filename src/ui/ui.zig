@@ -169,3 +169,11 @@ test {
 test {
     _ = @import("damage_volatile_check.zig");
 }
+
+test {
+    _ = @import("tt/cluster_fallback_check.zig");
+}
+
+test "bounded CPU damage regressions" {
+    try std.testing.expect(try CpuDamage.check(std.testing.allocator) > 0);
+}

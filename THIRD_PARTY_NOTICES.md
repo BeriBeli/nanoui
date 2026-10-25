@@ -74,3 +74,11 @@ standard library TLS client (MIT, Zig contributors). It is a dependency
 repositories with their own licenses and notices. Both use CodeGraff's
 colors and run graff as a separate program; CodeGraff is distributed under
 its modified AGPLv3 terms, as their notices say.
+
+## Portable font test fixtures
+
+The immutable OpenSans and M+ regression fixtures under `src/ui/tt/testdata`
+come from HarfBuzz 14.6.0 and retain their embedded notices. OpenSans is
+Apache-2.0 (Google Corporation, 2010-2011); M+ is OFL-1.1 (The M+ Project
+Authors, 2016). See that directory and `third_party/licenses/` for hashes and
+license texts. The fixture bytes are embedded only in tests.

@@ -491,6 +491,11 @@ your changes, use `--fork`: `cd apps/nanomon && zig build run --fork=../..`.
 
 ## Performance
 
+The fork owns the [X11 forwarding benchmark](tools/x11-bench/README.md) and
+its Linux 3.10/glibc 2.17 compatibility implementation. Build and package it
+with `python3 tools/build-x11-bench.py`; `--native` runs offscreen host checks.
+See [fork maintenance](docs/fork-maintenance.md) for ownership and validation.
+
 Performance is measured headless with [`hillclimb/`](hillclimb/README.md):
 the same scenes rendered through each framework's own frames and offscreen
 Metal renderer, on an Apple M3 Ultra. The figures are medians per frame in

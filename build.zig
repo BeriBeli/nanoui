@@ -58,6 +58,8 @@ pub fn build(b: *std.Build) void {
         if (b.lazyDependency("http_zig", .{ .target = target, .optimize = optimize })) |d| nanoui.addImport("http_zig", d.module("http_zig"));
     }
 
+    @import("tools/x11-bench/build.zig").add(b, target, @import("build.zig.zon").version);
+
     // nui: the command that makes and checks apps (tools/nui).
     const nui_options = b.addOptions();
     nui_options.addOption([]const u8, "version", @import("build.zig.zon").version);

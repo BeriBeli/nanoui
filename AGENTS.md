@@ -36,6 +36,10 @@ changes locally.
   CPU extensions, or newer runtime libraries without an explicit change to
   the support policy. Kernel/glibc compatibility alone does not establish
   compatibility with the target GTK, GLib, Cairo or X server.
+- Framework compatibility changes and X11 benchmarks belong in this fork,
+  with self-contained regression tests. Consumers pin the resulting commit;
+  do not move these fixes back into an application patch chain or require
+  application-exported font I/O symbols.
 - Prioritize X11 forwarding: efficient CPU rendering, retained backing
   pixels, dirty-region presentation, scrolling, fewer allocations, and
   bounded memory and caches. Avoid unnecessary full-window repainting,

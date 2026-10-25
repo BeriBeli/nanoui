@@ -6,7 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const font = @import("font.zig");
-const legacy = @import("legacy_io.zig");
+const files = @import("file_io.zig");
 const cluster = @import("cluster_fallback.zig");
 const bounds = @import("cluster_fallback_bounds.zig");
 const sources = @import("font_sources.zig");
@@ -237,12 +237,10 @@ pub const Db = struct {
             return;
         }
         if (builtin.os.tag == .linux and !android) {
-            const z = db.gpa.dupeSentinel(u8, path, 0) catch return;
-            defer db.gpa.free(z);
-            legacy.scan(z, db, struct {
-                fn found(ctx: ?*anyopaque, p: [*:0]const u8) callconv(.c) void {
-                    const d: *Db = @ptrCast(@alignCast(ctx.?));
-                    d.addFile(std.mem.span(p));
+            files.scan(path, db, struct {
+                fn found(ctx: *anyopaque, p: []const u8) void {
+                    const d: *Db = @ptrCast(@alignCast(ctx));
+                    d.addFile(p);
                 }
             }.found);
             return;
@@ -316,13 +314,13 @@ pub const Db = struct {
         return db.readBoundedWith(path, budget, db.gpa);
     }
     fn readBoundedWith(db: *Db, path: []const u8, budget: usize, allocator: std.mem.Allocator) ?[]u8 {
-        const file = legacy.File.open(db.gpa, path) catch |err| {
+        const file = files.File.open(db.gpa, db.io, path) catch |err| {
             db.metrics.last_missing = if (err == error.OutOfMemory) .out_of_memory else .io;
             return null;
         };
         defer file.close();
         const len = file.length() catch |err| {
-            if (err == error.FontSize) db.limit(.source_bytes) else db.metrics.last_missing = .io;
+            if (err == error.FontTooLarge) db.limit(.source_bytes) else db.metrics.last_missing = .io;
             return null;
         };
         if (len > Limits.source_bytes) {
@@ -341,7 +339,7 @@ pub const Db = struct {
             db.metrics.last_missing = .out_of_memory;
             return null;
         };
-        _ = file.readAll(data, 0) catch {
+        file.readPositionalAll(data, 0) catch {
             allocator.free(data);
             db.metrics.last_missing = .io;
             return null;
