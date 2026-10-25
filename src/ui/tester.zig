@@ -203,9 +203,26 @@ pub const Tester = struct {
     pub fn findText(t: *Tester, s: []const u8) ?types.Rect {
         for (t.ctx.nodes.items) |n| switch (n.content) {
             .text => |tx| if (std.mem.eql(u8, tx.str, s)) return n.rect,
+            .glyph_run => |tx| if (std.mem.eql(u8, tx.str, s)) return n.rect,
             .icon, .image, .texture, .canvas, .none => {},
         };
         return null;
+    }
+
+    /// The VT grid cell containing the first matching byte sequence. This
+    /// remains independent of ligature glyph count, kerning and font advances.
+    pub fn findGridCell(t: *Tester, s: []const u8) ?types.Rect {
+        if (s.len == 0) return null;
+        for (t.ctx.nodes.items) |n| if (n.content == .glyph_run) {
+            const run = n.content.glyph_run;
+            const at = std.mem.indexOf(u8, run.str, s) orelse continue;
+            const index = @import("grid_text.zig").owner(run.cells, @intCast(at)) catch continue;
+            const last = run.cells[run.cells.len - 1];
+            const cw = n.rect.w / @as(f32, @floatFromInt(last.col + last.width));
+            const cell = run.cells[index];
+            return .{ .x = n.rect.x + @as(f32, @floatFromInt(cell.col)) * cw, .y = n.rect.y, .w = @as(f32, @floatFromInt(cell.width)) * cw, .h = n.rect.h };
+        };
+        return t.findText(s);
     }
 
     pub fn hasText(t: *Tester, s: []const u8) bool {
@@ -216,6 +233,7 @@ pub const Tester = struct {
     pub fn containsText(t: *Tester, s: []const u8) bool {
         for (t.ctx.nodes.items) |n| switch (n.content) {
             .text => |tx| if (std.mem.indexOf(u8, tx.str, s) != null) return true,
+            .glyph_run => |tx| if (std.mem.indexOf(u8, tx.str, s) != null) return true,
             .icon, .image, .texture, .canvas, .none => {},
         };
         return false;

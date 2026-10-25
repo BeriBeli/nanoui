@@ -57,12 +57,12 @@ pub fn measure(c: *Context, index: u32, avail_w: f32) types.Size {
             }
         },
         .icon => |ic| {
-            if (c.text.atlas.symbol(ic.name, ic.size, @intFromEnum(ic.weight))) |sp| {
+            if (c.text.atlas.symbol(ic.name, ic.size, @backingInt(ic.weight))) |sp| {
                 content = .{ .w = sp.w + 2 * sp.x, .h = sp.h + 2 * sp.y };
             } else content = .{ .w = ic.size, .h = ic.size };
         },
         // Sized by its style (the widget gives the size).
-        .image, .texture, .canvas => {},
+        .image, .texture, .canvas, .glyph_run => {},
         .none => {
             var child = n.first_child;
             var count: f32 = 0;

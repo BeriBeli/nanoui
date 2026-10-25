@@ -107,7 +107,8 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip:
         });
         switch (n.content) {
             .text => |t| paintText(c, out, index, n, t, clip4, opacity, selectable),
-            .icon => |ic| if (c.text.atlas.symbol(ic.name, ic.size, @intFromEnum(ic.weight))) |sp| {
+            .glyph_run => |run| paintGlyphRun(c, out, r, run, clip4, opacity),
+            .icon => |ic| if (c.text.atlas.symbol(ic.name, ic.size, @backingInt(ic.weight))) |sp| {
                 // Centered in its box, which may be larger (a fixed frame).
                 const inner = r.inset(st.padding);
                 const x = inner.x + (inner.w - (sp.w + 2 * sp.x)) / 2;
@@ -187,6 +188,25 @@ fn scaleItems(items: []metal.Instance, cx: f32, cy: f32, k: f32, outer: [4]f32) 
             const round = metal.clipCorners(it.clip_round);
             it.clip_round = metal.clipRound(round.radius * k, round.corners);
         }
+    }
+}
+
+fn paintGlyphRun(c: *Context, out: *std.ArrayList(metal.Instance), r: types.Rect, run: ctx_mod.Content.GlyphRun, clip4: [4]f32, opacity: f32) void {
+    const color = metal.color4(run.color.alpha(opacity));
+    const baseline = snap(r.y + run.baseline, c.scale);
+    for (run.glyphs) |glyph| {
+        const pen = (r.x + glyph.x) * c.scale;
+        if (pen / c.scale > clip4[2]) continue;
+        const px = @floor(pen);
+        const bin: u8 = @intFromFloat(@min(text_mod.subpixel_bins - 1, @floor((pen - px) * text_mod.subpixel_bins)));
+        const sp = c.text.glyph(glyph, bin) orelse continue;
+        push(c, out, .{
+            .rect = .{ px / c.scale + sp.x, baseline - glyph.y + sp.y, sp.w, sp.h },
+            .color = color,
+            .uv = sp.uv,
+            .kind = metal.Kind.text,
+            .clip = clip4,
+        });
     }
 }
 

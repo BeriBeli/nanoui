@@ -38,6 +38,7 @@ pub const Font = struct {
     ascent: f32,
     descent: f32,
     leading: f32,
+    features_applied: bool = true,
 
     pub fn lineHeight(f: Font) f32 {
         return @ceil(f.ascent + f.descent + f.leading);
@@ -54,10 +55,10 @@ pub const Layout = struct { width: f32, glyphs: []const Glyph };
 /// A line of wrapped text: a byte range and its width.
 pub const Line = struct { start: usize, end: usize, width: f32 };
 
-const FontKey = struct { size_bits: u32, weight: types.Weight, mono: bool, italic: bool };
+const FontKey = struct { size_bits: u32, weight: types.Weight, mono: bool, italic: bool, features: u64 };
 
 fn fontKey(style: types.TextStyle) FontKey {
-    return .{ .size_bits = @bitCast(style.size), .weight = style.weight, .mono = style.mono, .italic = style.italic };
+    return .{ .size_bits = @bitCast(style.size), .weight = style.weight, .mono = style.mono, .italic = style.italic, .features = @import("font_features.zig").hash(style.features) };
 }
 
 pub const TextSystem = struct {
@@ -66,6 +67,10 @@ pub const TextSystem = struct {
     /// The pictures shown (`ui.image`).
     images: @import("images.zig").Images,
     scale: f32 = 2,
+    fallbacks: @import("font_families.zig").Families = .{},
+    last_shape_error: ?[]const u8 = null,
+    failed_font: ?cf.CTFontRef = null,
+    cascade_truncated: bool = false,
     fonts: std.AutoHashMapUnmanaged(FontKey, Font) = .empty,
     /// Every font a run used, retained; glyphs refer to them by index.
     run_fonts: std.ArrayList(cf.CTFontRef) = .empty,
@@ -77,6 +82,7 @@ pub const TextSystem = struct {
     scratch_glyphs: std.ArrayList(u16) = .empty,
     scratch_points: std.ArrayList(objc.CGPoint) = .empty,
     /// The theme's font families (null: the system's).
+    names: @import("font_names.zig").Names = .{},
     family: ?[]const u8 = null,
     mono_family: ?[]const u8 = null,
     /// Every size times this (`Context.setZoom`).
@@ -87,6 +93,9 @@ pub const TextSystem = struct {
     }
 
     pub fn deinit(self: *TextSystem) void {
+        self.names.deinit(self.gpa);
+        if (self.failed_font) |ref| cf.CFRelease(ref);
+        self.fallbacks.deinit(self.gpa);
         self.images.deinit();
         var fit = self.fonts.valueIterator();
         while (fit.next()) |f| cf.CFRelease(f.ref);
@@ -114,6 +123,8 @@ pub const TextSystem = struct {
     }
 
     pub fn setScale(self: *TextSystem, scale: f32) void {
+        if (self.scale == scale) return;
+        self.dropCaches();
         self.scale = scale;
         self.atlas.setScale(scale);
     }
@@ -121,15 +132,13 @@ pub const TextSystem = struct {
     /// Uses the theme's font families; a change drops every cached font,
     /// shaping and wrap.
     pub fn setFamilies(self: *TextSystem, family: ?[]const u8, mono_family: ?[]const u8) void {
-        const same = struct {
-            fn f(a: ?[]const u8, b: ?[]const u8) bool {
-                if (a == null or b == null) return a == null and b == null;
-                return std.mem.eql(u8, a.?, b.?);
-            }
-        }.f;
-        if (same(self.family, family) and same(self.mono_family, mono_family)) return;
-        self.family = family;
-        self.mono_family = mono_family;
+        const changed = self.names.set(self.gpa, family, mono_family) catch |err| {
+            self.last_shape_error = @errorName(err);
+            return;
+        };
+        if (!changed) return;
+        self.family = self.names.family;
+        self.mono_family = self.names.mono;
         self.dropCaches();
     }
 
@@ -156,6 +165,10 @@ pub const TextSystem = struct {
         self.dropCaches();
     }
 
+    pub fn setFallbacks(self: *TextSystem, names: []const []const u8) !void {
+        if (try self.fallbacks.set(self.gpa, names)) self.dropCaches();
+    }
+
     /// A line's height in `style`, its leading applied.
     pub fn lineHeight(self: *TextSystem, style: types.TextStyle) f32 {
         if (style.line_height > 0) return style.line_height * self.zoom;
@@ -165,6 +178,12 @@ pub const TextSystem = struct {
 
     /// Called at the start of every frame: layouts unused for two frames go.
     pub fn beginFrame(self: *TextSystem) void {
+        if (self.run_fonts.items.len >= 768) {
+            self.dropCaches();
+            for (self.run_fonts.items) |ref| cf.CFRelease(ref);
+            self.run_fonts.clearRetainingCapacity();
+            self.atlas.reset();
+        }
         self.atlas.reset_during_frame = false;
         freeLayouts(self.gpa, &self.previous);
         std.mem.swap(std.AutoHashMapUnmanaged(u64, Layout), &self.layouts, &self.previous);
@@ -180,14 +199,26 @@ pub const TextSystem = struct {
     pub fn font(self: *TextSystem, style: types.TextStyle) Font {
         const fk = fontKey(style);
         if (self.fonts.get(fk)) |f| return f;
-        const ref = fonts.create(if (style.mono) self.mono_family else self.family, style.size * self.zoom, style.weight, style.italic, style.mono);
+        const plain = fonts.create(if (style.mono) self.mono_family else self.family, style.size * self.zoom, style.weight, style.italic, style.mono);
+        const modified = @import("font_features_mac.zig").applyDetailed(plain, style.features, self.fallbacks.items) catch |err| failed: {
+            self.last_shape_error = @errorName(err);
+            break :failed null;
+        };
+        const ref = if (modified) |value| value.font else plain;
+        if (modified) |value| self.cascade_truncated = self.cascade_truncated or value.cascade.truncated;
+        if (modified != null) cf.CFRelease(plain);
         const f: Font = .{
             .ref = ref,
             .ascent = @floatCast(CTFontGetAscent(ref)),
             .descent = @floatCast(CTFontGetDescent(ref)),
             .leading = @floatCast(CTFontGetLeading(ref)),
+            .features_applied = modified != null,
         };
-        self.fonts.put(self.gpa, fk, f) catch {};
+        self.fonts.put(self.gpa, fk, f) catch {
+            if (self.failed_font) |old| cf.CFRelease(old);
+            self.failed_font = ref;
+            self.last_shape_error = "OutOfMemory";
+        };
         return f;
     }
 
@@ -195,7 +226,9 @@ pub const TextSystem = struct {
         var h = std.hash.Wyhash.init(extra);
         h.update(s);
         h.update(std.mem.asBytes(&style.size));
-        h.update(&.{ @intFromEnum(style.weight), @intFromBool(style.mono), @intFromBool(style.italic) });
+        const features = @import("font_features.zig").hash(style.features);
+        h.update(std.mem.asBytes(&features));
+        h.update(&.{ @backingInt(style.weight), @intFromBool(style.mono), @intFromBool(style.italic) });
         return h.final();
     }
 
@@ -211,7 +244,15 @@ pub const TextSystem = struct {
         for (self.run_fonts.items, 0..) |known, i| {
             if (known == f or (CFHash(known) == h and CFEqual(known, f))) return @intCast(i);
         }
-        self.run_fonts.append(self.gpa, @ptrCast(cf.CFRetain(f))) catch return 0;
+        if (self.run_fonts.items.len >= 1024) {
+            self.last_shape_error = "RunFontLimit";
+            return 0xffff;
+        }
+        self.run_fonts.append(self.gpa, f) catch {
+            self.last_shape_error = "OutOfMemory";
+            return 0xffff;
+        };
+        _ = cf.CFRetain(f);
         return @intCast(self.run_fonts.items.len - 1);
     }
 
@@ -226,7 +267,10 @@ pub const TextSystem = struct {
     pub fn cached(self: *TextSystem, k: u64) ?Layout {
         if (self.layouts.get(k)) |l| return l;
         if (self.previous.fetchRemove(k)) |kv| {
-            self.layouts.put(self.gpa, k, kv.value) catch {};
+            self.layouts.put(self.gpa, k, kv.value) catch {
+                self.gpa.free(kv.value.glyphs);
+                return null;
+            };
             return kv.value;
         }
         return null;
@@ -242,14 +286,39 @@ pub const TextSystem = struct {
     }
 
     fn shape(self: *TextSystem, s: []const u8, style: types.TextStyle) !Layout {
-        if (s.len <= 256) if (try self.shapeFast(s, style)) |l| return l;
+        if (style.features.len == 0 and s.len <= 256) if (try self.shapeFast(s, style)) |l| return l;
         const ln = self.line(s, style);
         defer cf.CFRelease(ln);
         return self.glyphsOf(ln, s);
     }
 
+    pub fn gridLayout(self: *TextSystem, s: []const u8, style: types.TextStyle, cells: []const @import("grid_text.zig").Cell, cw: f32) !Layout {
+        return @import("grid_text.zig").layout(self, s, style, cells, cw);
+    }
+
+    /// Full CoreText shaping, with each cluster anchored to its VT cell's
+    /// actual caret origin. No ASCII table or guessed character advance.
+    pub fn shapeGrid(self: *TextSystem, s: []const u8, style: types.TextStyle, cells: []const @import("grid_text.zig").Cell, cw: f32) !Layout {
+        const grid = @import("grid_text.zig");
+        if (!self.font(style).features_applied) return error.FontSettingsUnavailable;
+        const ln = self.line(s, style);
+        defer cf.CFRelease(ln);
+        var result = try self.glyphsOfLimit(ln, s, grid.max_glyphs);
+        errdefer self.gpa.free(result.glyphs);
+        for (@constCast(result.glyphs)) |*item| {
+            const at = try grid.owner(cells, item.index);
+            const caret = cf.CTLineGetOffsetForStringIndex(ln, cf.utf16Offset(s, cells[at].byte_start), null);
+            item.x += @as(f32, @floatFromInt(cells[at].col)) * cw - @as(f32, @floatCast(caret));
+        }
+        result.width = grid.width(cells, cw);
+        return result;
+    }
+
     /// The glyphs of a shaped line of `s`, with byte offsets.
     pub fn glyphsOf(self: *TextSystem, ln: cf.CTLineRef, s: []const u8) !Layout {
+        return self.glyphsOfLimit(ln, s, std.math.maxInt(usize));
+    }
+    fn glyphsOfLimit(self: *TextSystem, ln: cf.CTLineRef, s: []const u8, limit: usize) !Layout {
         const w: f32 = @floatCast(cf.CTLineGetTypographicBounds(ln, null, null, null));
         var glyphs: std.ArrayList(Glyph) = .empty;
         errdefer glyphs.deinit(self.gpa);
@@ -274,8 +343,10 @@ pub const TextSystem = struct {
             const run = CFArrayGetValueAtIndex(runs, r);
             const count: usize = @intCast(CTRunGetGlyphCount(run));
             if (count == 0) continue;
+            if (count > limit - glyphs.items.len) return error.GridGlyphLimit;
             const run_font = CFDictionaryGetValue(CTRunGetAttributes(run), cf.kCTFontAttributeName) orelse continue;
             const fid = self.fontId(@ptrCast(run_font));
+            if (fid == 0xffff) return error.RunFontUnavailable;
             try self.scratch_glyphs.resize(self.gpa, count);
             try self.scratch_points.resize(self.gpa, count);
             const all: cf.CFRange = .{ .location = 0, .length = 0 };
@@ -317,7 +388,10 @@ pub const TextSystem = struct {
     /// The atlas sprite of a shaped glyph at `bin` quarters of a pixel.
     pub fn glyph(self: *TextSystem, g: Glyph, bin: u8) ?Sprite {
         if (g.font >= self.run_fonts.items.len) return null;
-        return self.atlas.glyph(g.font, self.run_fonts.items[g.font], g.glyph, bin);
+        if (g.glyph == 0) self.last_shape_error = "MissingGlyph";
+        const sprite = self.atlas.glyph(g.font, self.run_fonts.items[g.font], g.glyph, bin);
+        if (self.atlas.last_raster_error) |reason| self.last_shape_error = reason;
+        return sprite;
     }
 
     /// The width of `s` on one line.

@@ -20,6 +20,7 @@ pub const Content = union(enum) {
     texture: Texture,
     /// What a canvas draws (`ui.canvas`), at points within its box.
     canvas: *const @import("draw.zig").Canvas,
+    glyph_run: GlyphRun,
 
     /// One of this frame's textures (`Context.textures`), the part `uv`
     /// (0 to 1) of it shown.
@@ -27,6 +28,15 @@ pub const Content = union(enum) {
         slot: u32,
         uv: [4]f32 = .{ 0, 0, 1, 1 },
         opacity: f32 = 1,
+    };
+
+    /// Already shaped, grid-positioned glyphs, borrowed until frame completion.
+    pub const GlyphRun = struct {
+        str: []const u8,
+        cells: []const @import("grid_text.zig").Cell,
+        glyphs: []const text.Glyph,
+        color: types.Color,
+        baseline: f32,
     };
 
     /// A picture: its key in the image atlas, and its bytes for the first
@@ -123,6 +133,7 @@ const Memory = struct { bytes: [48]u8 align(16), frame: u64 };
 pub const Context = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
+    arena_retention: @import("arena_retention.zig").State = .{},
     text: *text.TextSystem,
     theme: Theme = .light,
     size: types.Size = .{},
@@ -130,6 +141,8 @@ pub const Context = struct {
     /// What draws the frames: Metal, OpenGL (Linux, where there is a GPU),
     /// or nanoui's own CPU renderer.
     renderer: []const u8 = if (@import("text.zig").portable) "CPU" else "Metal",
+    /// Font points to logical UI units; macOS uses points directly.
+    points_to_logical: f32 = 1,
     /// Seconds since the previous frame, for animations.
     dt: f32 = 1.0 / 60.0,
     /// Seconds since the first frame: the clock of animations a view drives itself.
@@ -263,7 +276,7 @@ pub const Context = struct {
 
     /// Starts building a frame: the root fills the window.
     pub fn begin(c: *Context) void {
-        _ = c.arena.reset(.retain_capacity);
+        c.arena_retention.begin(&c.arena, c.time);
         c.textures.clearRetainingCapacity();
         c.nodes.clearRetainingCapacity();
         c.stack.clearRetainingCapacity();

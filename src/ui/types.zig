@@ -216,6 +216,8 @@ pub const TextStyle = struct {
     wrap: bool = false,
     mono: bool = false,
     italic: bool = false,
+    /// Borrowed through the frame/layout request; caches hash the values.
+    features: []const @import("font_features.zig").Feature = &.{},
     /// Line height as a multiple of the font's (1.5 for airy prose).
     leading: f32 = 1,
     /// Line height in points (CSS's `line-height: 22px`), taking the place

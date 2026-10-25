@@ -44,6 +44,12 @@ pub const Length = types.Length;
 pub const Style = types.Style;
 pub const TextStyle = types.TextStyle;
 pub const Truncate = types.Truncate;
+pub const FontFeature = @import("font_features.zig").Feature;
+pub const gridText = @import("grid_text.zig");
+pub const CpuDamage = @import("damage.zig");
+pub const FontSources = @import("tt/font_sources.zig");
+pub const raster = @import("raster.zig");
+pub const gpu = @import("gpu.zig");
 pub const Shadow = types.Shadow;
 pub const Glass = types.Glass;
 pub const Weight = types.Weight;
@@ -158,4 +164,8 @@ test {
     _ = @import("tests_truncate.zig");
     _ = @import("icons.zig");
     _ = keys;
+}
+
+test {
+    _ = @import("damage_volatile_check.zig");
 }

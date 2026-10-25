@@ -79,5 +79,6 @@ pub fn run(c: *Context, view: View, ts: *text.TextSystem, instances: *std.ArrayL
     const hot_before = c.hot;
     c.commitHits();
     c.finish();
+    if (c.arena_retention.finish(&c.arena, c.time)) |delay| c.frameIn(delay);
     return .{ .hot_changed = c.hot != hot_before };
 }

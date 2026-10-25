@@ -6,6 +6,42 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const font = @import("font.zig");
+const legacy = @import("legacy_io.zig");
+const cluster = @import("cluster_fallback.zig");
+const bounds = @import("cluster_fallback_bounds.zig");
+const sources = @import("font_sources.zig");
+pub const MissingReason = cluster.MissingReason;
+pub const Limits = struct {
+    pub const source_bytes = 64 << 20;
+    pub const loaded_bytes = 128 << 20;
+    pub const loaded_faces = 128;
+    pub const faces = 4096;
+    pub const collection_faces = 256;
+    pub const scan_files = 8192;
+    pub const directory_entries = 32768;
+    pub const fallback_names = 32;
+    pub const family_bytes = 256;
+    pub const path_bytes = 4096;
+    pub const arbitrary_probes = 48;
+};
+pub const Limit = enum { source_bytes, loaded_bytes, loaded_faces, faces, collection_faces, scan_files, directory_entries, fallback_names, family_bytes, path_bytes, lookup_entries, cluster_bytes };
+pub const Source = struct { bytes: []const u8, index: u32, digest: [32]u8 };
+pub const Stats = struct {
+    faces: usize = 0,
+    scanned_files: usize = 0,
+    loaded_faces: usize = 0,
+    loaded_bytes: usize = 0,
+    lookup_entries: usize = 0,
+    fallback_names: usize = 0,
+    generation: u64 = 1,
+    limit_hits: u64 = 0,
+    cache_resets: u64 = 0,
+    failed_loads: u64 = 0,
+    probe_releases: u64 = 0,
+    probe_released_bytes: u64 = 0,
+    last_limit: ?Limit = null,
+    last_missing: MissingReason = .none,
+};
 
 pub const Face = struct {
     path: []const u8,
@@ -13,16 +49,13 @@ pub const Face = struct {
     style: font.Style,
     /// A font the app brought (`ui.registerFont`): its bytes, not a file.
     memory: ?[]const u8 = null,
-
-    fn read(f: Face, db: *Db) ![]u8 {
-        if (f.memory) |m| return db.gpa.dupe(u8, m);
-        return std.Io.Dir.cwd().readFileAlloc(db.io, f.path, db.gpa, .limited(256 << 20));
-    }
 };
 
 const Loaded = struct {
-    data: []u8,
+    data: []const u8,
+    source: *sources.Source,
     font: font.Font,
+    digest: [32]u8,
 };
 
 const android = builtin.abi.isAndroid();
@@ -31,7 +64,7 @@ const android = builtin.abi.isAndroid();
 const sans = (if (android) [_][]const u8{"Roboto"} else [_][]const u8{}) ++ [_][]const u8{ "Inter", "Geist", "Segoe UI", "Noto Sans", "Cantarell", "Ubuntu", "DejaVu Sans", "Liberation Sans", "Arial", "Helvetica" };
 const monos = (if (android) [_][]const u8{ "Droid Sans Mono", "Cutive Mono" } else [_][]const u8{}) ++ [_][]const u8{ "JetBrains Mono", "Geist Mono", "Cascadia Mono", "Consolas", "Noto Sans Mono", "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", "Menlo", "Courier New" };
 /// Where characters a font lacks are looked for first.
-const fallbacks = [_][]const u8{ "Noto Sans", "DejaVu Sans", "Segoe UI Symbol", "Noto Sans Symbols", "Noto Sans Symbols2", "Arial Unicode MS", "Symbola" };
+const fallbacks = [_][]const u8{ "WenQuanYi Zen Hei", "Noto Sans CJK SC", "Noto Sans SC", "Noto Sans", "DejaVu Sans", "Segoe UI Symbol", "Noto Sans Symbols", "Noto Sans Symbols2", "Arial Unicode MS", "Symbola" };
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
@@ -47,9 +80,11 @@ pub const Db = struct {
     faces: std.ArrayList(Face) = .empty,
     loaded: std.AutoHashMapUnmanaged(u32, *Loaded) = .empty,
     scanned: bool = false,
-    /// Characters' fallback faces, found once (null: none has it).
-    found: std.AutoHashMapUnmanaged(u21, ?u32) = .empty,
-    /// How many of the app's fonts (`font_registry`) are added.
+    /// Keys own the entire small cluster, primary, weight, italic and generation.
+    found: std.AutoHashMapUnmanaged(cluster.Key, cluster.Result) = .empty,
+    fallback_names: []const []const u8 = &.{},
+    generation: u64 = 1,
+    metrics: Stats = .{},
     bundled: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) Db {
@@ -61,11 +96,72 @@ pub const Db = struct {
         db.faces.deinit(db.gpa);
         var it = db.loaded.valueIterator();
         while (it.next()) |l| {
-            db.gpa.free(l.*.data);
+            sources.release(l.*.source);
             db.gpa.destroy(l.*);
         }
         db.loaded.deinit(db.gpa);
         db.found.deinit(db.gpa);
+        for (db.fallback_names) |name| db.gpa.free(name);
+        if (db.fallback_names.len != 0) db.gpa.free(db.fallback_names);
+    }
+
+    pub fn stats(db: *const Db) Stats {
+        var result = db.metrics;
+        result.faces = db.faces.items.len;
+        result.loaded_faces = db.loaded.count();
+        result.lookup_entries = db.found.count();
+        result.fallback_names = db.fallback_names.len;
+        result.generation = db.generation;
+        return result;
+    }
+    pub fn sharedSourceBytes(_: *const Db) usize {
+        return sources.bytes();
+    }
+
+    fn limit(db: *Db, value: Limit) void {
+        db.metrics.last_limit = value;
+        db.metrics.limit_hits +|= 1;
+        db.metrics.last_missing = .resource_limit;
+    }
+
+    fn clearLookup(db: *Db) void {
+        db.found.clearRetainingCapacity();
+        db.metrics.cache_resets +|= 1;
+    }
+
+    /// Transactional owned copies. Content-equal updates do not allocate or
+    /// invalidate caches; allocation/validation failure preserves the old list.
+    pub fn setFallbacks(db: *Db, names: []const []const u8) !bool {
+        if (names.len > Limits.fallback_names) {
+            db.limit(.fallback_names);
+            return error.TooManyFallbacks;
+        }
+        var same = names.len == db.fallback_names.len;
+        for (names, 0..) |name, i| {
+            if (name.len == 0 or name.len > Limits.family_bytes or std.mem.indexOfScalar(u8, name, 0) != null or !std.unicode.utf8ValidateSlice(name)) {
+                db.limit(.family_bytes);
+                return error.InvalidFallbackFamily;
+            }
+            if (same and !std.mem.eql(u8, name, db.fallback_names[i])) same = false;
+        }
+        if (same) return false;
+        if (db.generation == std.math.maxInt(u64)) return error.GenerationExhausted;
+        const owned = try db.gpa.alloc([]const u8, names.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned[0..initialized]) |name| db.gpa.free(name);
+            db.gpa.free(owned);
+        }
+        for (names, 0..) |name, i| {
+            owned[i] = try db.gpa.dupe(u8, name);
+            initialized += 1;
+        }
+        for (db.fallback_names) |name| db.gpa.free(name);
+        if (db.fallback_names.len != 0) db.gpa.free(db.fallback_names);
+        db.fallback_names = owned;
+        db.generation += 1;
+        db.clearLookup();
+        return true;
     }
 
     /// Adds the faces of fonts the app registered since last asked.
@@ -76,12 +172,33 @@ pub const Db = struct {
 
     /// Adds the faces of a font file's bytes, kept by the caller.
     pub fn addMemory(db: *Db, data: []const u8) void {
-        for (0..font.faces(data)) |i| {
-            const t = font.Tables.read(data, i) catch continue;
+        if (data.len < 12) {
+            db.metrics.last_missing = .invalid_font;
+            return;
+        }
+        if (data.len > Limits.source_bytes) {
+            db.limit(.source_bytes);
+            return;
+        }
+        const count = font.faces(data);
+        if (count > Limits.collection_faces) {
+            db.limit(.collection_faces);
+            return;
+        }
+        for (0..count) |i| {
+            if (db.faces.items.len >= Limits.faces) {
+                db.limit(.faces);
+                break;
+            }
+            const t = bounds.tables(data, @intCast(i)) catch continue;
             const style = font.Style.read(data, t);
             if (style.family_len == 0) continue;
             const owned = db.gpa.dupe(u8, "") catch return;
-            db.faces.append(db.gpa, .{ .path = owned, .index = @intCast(i), .style = style, .memory = data }) catch db.gpa.free(owned);
+            db.faces.append(db.gpa, .{ .path = owned, .index = @intCast(i), .style = style, .memory = data }) catch {
+                db.gpa.free(owned);
+                return;
+            };
+            db.clearLookup();
         }
     }
 
@@ -115,11 +232,32 @@ pub const Db = struct {
     }
 
     pub fn scanDir(db: *Db, path: []const u8) void {
+        if (path.len > Limits.path_bytes) {
+            db.limit(.path_bytes);
+            return;
+        }
+        if (builtin.os.tag == .linux and !android) {
+            const z = db.gpa.dupeSentinel(u8, path, 0) catch return;
+            defer db.gpa.free(z);
+            legacy.scan(z, db, struct {
+                fn found(ctx: ?*anyopaque, p: [*:0]const u8) callconv(.c) void {
+                    const d: *Db = @ptrCast(@alignCast(ctx.?));
+                    d.addFile(std.mem.span(p));
+                }
+            }.found);
+            return;
+        }
         var dir = std.Io.Dir.cwd().openDir(db.io, path, .{ .iterate = true }) catch return;
         defer dir.close(db.io);
         var walker = dir.walk(db.gpa) catch return;
         defer walker.deinit();
+        var entries: usize = 0;
         while (walker.next(db.io) catch null) |e| {
+            entries += 1;
+            if (entries > Limits.directory_entries) {
+                db.limit(.directory_entries);
+                break;
+            }
             if (e.kind != .file and e.kind != .sym_link) continue;
             const ext = std.fs.path.extension(e.basename);
             if (!std.ascii.eqlIgnoreCase(ext, ".ttf") and !std.ascii.eqlIgnoreCase(ext, ".ttc")) continue;
@@ -129,29 +267,86 @@ pub const Db = struct {
         }
     }
 
-    /// Reads a file's faces' styles, touching only the tables they need.
+    /// Reads only bounded TrueType sources; TTC counts are checked before the
+    /// loop. The full bounded buffer avoids reading uninitialized table pages.
     pub fn addFile(db: *Db, path: []const u8) void {
-        var file = std.Io.Dir.cwd().openFile(db.io, path, .{}) catch return;
-        defer file.close(db.io);
-        const len = file.length(db.io) catch return;
-        if (len < 12 or len > 256 << 20) return;
-        // Untouched pages of an anonymous mapping cost nothing: the
-        // tables read land at their offsets, the rest stays unread.
-        const data = std.heap.page_allocator.alloc(u8, len) catch return;
-        defer std.heap.page_allocator.free(data);
-        _ = file.readPositionalAll(db.io, data[0..@min(len, 64 * 1024)], 0) catch return;
-        for (0..font.faces(data)) |i| {
-            const t = font.Tables.read(data, i) catch continue;
-            inline for (.{ "head", "os2", "name" }) |name| {
-                const off = @field(t, name);
-                const want: usize = if (std.mem.eql(u8, name, "name")) t.name_len else 100;
-                if (off != 0 and off < len) _ = file.readPositionalAll(db.io, data[off..@min(len, off + want)], off) catch {};
+        if (db.metrics.scanned_files >= Limits.scan_files) {
+            db.limit(.scan_files);
+            return;
+        }
+        db.metrics.scanned_files += 1;
+        if (path.len > Limits.path_bytes) {
+            db.limit(.path_bytes);
+            return;
+        }
+        if (db.faces.items.len >= Limits.faces) {
+            db.limit(.faces);
+            return;
+        }
+        for (db.faces.items) |face| if (std.mem.eql(u8, face.path, path)) return;
+        const data = db.readBounded(path, Limits.source_bytes) orelse return;
+        defer db.gpa.free(data);
+        const count = font.faces(data);
+        if (count > Limits.collection_faces) {
+            db.limit(.collection_faces);
+            return;
+        }
+        for (0..count) |i| {
+            if (db.faces.items.len >= Limits.faces) {
+                db.limit(.faces);
+                break;
             }
+            const t = bounds.tables(data, @intCast(i)) catch continue;
             const style = font.Style.read(data, t);
             if (style.family_len == 0) continue;
-            const owned = db.gpa.dupe(u8, path) catch return;
-            db.faces.append(db.gpa, .{ .path = owned, .index = @intCast(i), .style = style }) catch db.gpa.free(owned);
+            const owned = db.gpa.dupe(u8, path) catch {
+                db.metrics.last_missing = .out_of_memory;
+                return;
+            };
+            db.faces.append(db.gpa, .{ .path = owned, .index = @intCast(i), .style = style }) catch {
+                db.gpa.free(owned);
+                db.metrics.last_missing = .out_of_memory;
+                return;
+            };
+            db.clearLookup();
         }
+    }
+
+    fn readBounded(db: *Db, path: []const u8, budget: usize) ?[]u8 {
+        return db.readBoundedWith(path, budget, db.gpa);
+    }
+    fn readBoundedWith(db: *Db, path: []const u8, budget: usize, allocator: std.mem.Allocator) ?[]u8 {
+        const file = legacy.File.open(db.gpa, path) catch |err| {
+            db.metrics.last_missing = if (err == error.OutOfMemory) .out_of_memory else .io;
+            return null;
+        };
+        defer file.close();
+        const len = file.length() catch |err| {
+            if (err == error.FontSize) db.limit(.source_bytes) else db.metrics.last_missing = .io;
+            return null;
+        };
+        if (len > Limits.source_bytes) {
+            db.limit(.source_bytes);
+            return null;
+        }
+        if (len > budget) {
+            db.limit(.loaded_bytes);
+            return null;
+        }
+        if (len < 12) {
+            db.metrics.last_missing = .invalid_font;
+            return null;
+        }
+        const data = allocator.alloc(u8, len) catch {
+            db.metrics.last_missing = .out_of_memory;
+            return null;
+        };
+        _ = file.readAll(data, 0) catch {
+            allocator.free(data);
+            db.metrics.last_missing = .io;
+            return null;
+        };
+        return data;
     }
 
     /// The face of `family` nearest `weight` and `italic`, null when the
@@ -182,52 +377,207 @@ pub const Db = struct {
         return if (db.faces.items.len > 0) 0 else null;
     }
 
+    fn readFace(db: *Db, face: Face, budget: usize) ?[]u8 {
+        const data = face.memory orelse return db.readBoundedWith(face.path, budget, std.heap.page_allocator);
+        if (data.len > Limits.source_bytes) {
+            db.limit(.source_bytes);
+            return null;
+        }
+        if (data.len > budget) {
+            db.limit(.loaded_bytes);
+            return null;
+        }
+        return std.heap.page_allocator.dupe(u8, data) catch {
+            db.metrics.last_missing = .out_of_memory;
+            return null;
+        };
+    }
+
     /// A face's font, loaded on first use (null if it cannot be read).
     pub fn load(db: *Db, face: u32) ?*const font.Font {
+        return db.loadImpl(face, true);
+    }
+
+    fn loadImpl(db: *Db, face: u32, invalidate_lookup: bool) ?*const font.Font {
         if (db.loaded.get(face)) |l| return &l.font;
+        if (face >= db.faces.items.len) {
+            db.metrics.last_missing = .invalid_font;
+            return null;
+        }
+        if (db.loaded.count() >= Limits.loaded_faces) {
+            db.limit(.loaded_faces);
+            return null;
+        }
         const f = db.faces.items[face];
-        const data = f.read(db) catch return null;
+        const owned = db.readFace(f, Limits.loaded_bytes - db.metrics.loaded_bytes) orelse {
+            db.metrics.failed_loads +|= 1;
+            return null;
+        };
+        const held_source = sources.internOwned(owned) catch {
+            db.metrics.last_missing = .out_of_memory;
+            db.metrics.failed_loads +|= 1;
+            return null;
+        };
+        const data = held_source.bytes;
+        const t = bounds.tables(data, f.index) catch {
+            sources.release(held_source);
+            db.metrics.last_missing = .invalid_font;
+            db.metrics.failed_loads +|= 1;
+            return null;
+        };
+        bounds.cmap(data, t) catch {
+            sources.release(held_source);
+            db.metrics.last_missing = .invalid_font;
+            db.metrics.failed_loads +|= 1;
+            return null;
+        };
         const parsed = font.Font.init(data, f.index) catch {
-            db.gpa.free(data);
+            sources.release(held_source);
+            db.metrics.last_missing = .invalid_font;
+            db.metrics.failed_loads +|= 1;
             return null;
         };
         const l = db.gpa.create(Loaded) catch {
-            db.gpa.free(data);
+            sources.release(held_source);
+            db.metrics.last_missing = .out_of_memory;
+            db.metrics.failed_loads +|= 1;
             return null;
         };
-        l.* = .{ .data = data, .font = parsed };
+        l.* = .{ .data = data, .source = held_source, .font = parsed, .digest = held_source.digest };
         l.font.data = l.data;
-        db.loaded.put(db.gpa, face, l) catch {};
+        db.loaded.put(db.gpa, face, l) catch {
+            db.gpa.destroy(l);
+            sources.release(held_source);
+            db.metrics.last_missing = .out_of_memory;
+            db.metrics.failed_loads +|= 1;
+            return null;
+        };
+        db.metrics.loaded_bytes += data.len;
+        // Loading a previously untried face can satisfy a prior negative
+        // fallback result. Never evict fonts: the atlas borrows their pointers.
+        if (invalidate_lookup) db.clearLookup();
         return &l.font;
+    }
+
+    /// Borrowed until Db.deinit, identical to load(face).data; no second file
+    /// read and no font substitution between shaping and outline rasterization.
+    pub fn source(db: *Db, face: u32) ?Source {
+        _ = db.load(face) orelse return null;
+        const loaded = db.loaded.get(face).?;
+        return .{ .bytes = loaded.data, .index = db.faces.items[face].index, .digest = loaded.digest };
     }
 
     /// A face that has `cp`, for text its font lacks.
     pub fn fallback(db: *Db, cp: u21, weight: u16) ?u32 {
-        if (db.found.get(cp)) |f| return f;
-        const f = db.findFallback(cp, weight);
-        db.found.put(db.gpa, cp, f) catch {};
-        return f;
+        var text: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &text) catch {
+            db.metrics.last_missing = .invalid_utf8;
+            return null;
+        };
+        return db.choose(null, text[0..len], weight, false);
     }
 
-    fn findFallback(db: *Db, cp: u21, weight: u16) ?u32 {
-        for (fallbacks) |n| if (db.family(n, weight, false)) |face| {
-            if (db.load(face)) |f| if (f.glyphIndex(cp) != 0) return face;
+    /// text is exactly one VT-owned grapheme, never a paragraph. The caller
+    /// keeps VT cell width; this method only selects one face for the full text.
+    pub fn clusterFace(db: *Db, primary: u32, text: []const u8, weight: u16, italic: bool) ?u32 {
+        return db.choose(primary, text, weight, italic);
+    }
+
+    fn choose(db: *Db, primary: ?u32, text: []const u8, weight: u16, italic: bool) ?u32 {
+        db.metrics.last_missing = cluster.validate(text);
+        if (db.metrics.last_missing != .none) {
+            if (db.metrics.last_missing == .cluster_limit) {
+                db.limit(.cluster_bytes);
+                db.metrics.last_missing = .cluster_limit;
+            }
+            return null;
+        }
+        db.scan();
+        if (primary != null and primary.? >= db.faces.items.len) {
+            db.metrics.last_missing = .invalid_font;
+            return null;
+        }
+        const key = cluster.key(primary, text, weight, italic, db.generation);
+        if (key) |k| if (db.found.get(k)) |cached| {
+            db.metrics.last_missing = cached.reason;
+            return cached.face;
         };
-        // Any face at all: the loaded first, then the rest.
-        var it = db.loaded.iterator();
-        while (it.next()) |e| if (e.value_ptr.*.font.glyphIndex(cp) != 0) return e.key_ptr.*;
-        // Read, checked and let go unless it has it; a few dozen at most.
+        const result = db.findCluster(primary, text, weight, italic);
+        if (result != null) db.metrics.last_missing = .none else if (db.metrics.last_missing == .none) db.metrics.last_missing = .missing_glyph;
+        // Resource/IO/OOM failures may recover; don't cache them. Structurally
+        // invalid font sources are stable within this scanned Db generation;
+        // preserve their reason in the negative cache instead of rereading them.
+        if (key) |k| if (db.metrics.last_missing == .none or db.metrics.last_missing == .missing_glyph or db.metrics.last_missing == .probe_limit or db.metrics.last_missing == .invalid_font) {
+            if (db.found.count() >= cluster.max_entries) {
+                const reason = db.metrics.last_missing;
+                db.limit(.lookup_entries);
+                db.clearLookup();
+                db.metrics.last_missing = reason;
+            }
+            db.found.put(db.gpa, k, .{ .face = result, .reason = db.metrics.last_missing }) catch {};
+        };
+        return result;
+    }
+
+    fn covers(db: *Db, face: u32, text: []const u8) bool {
+        const was_loaded = db.loaded.contains(face);
+        const loaded = db.loadImpl(face, false) orelse return false;
+        const covered = cluster.covers(loaded, text);
+        if (covered and !was_loaded) db.clearLookup();
+        if (!covered and !was_loaded) {
+            // This new candidate has only reached this private synchronous
+            // coverage check. It has never reached TextSystem/runFont/atlas or
+            // a public source() caller. Existing published fonts are NEVER
+            // removed, including when their coverage check fails here.
+            const entry = db.loaded.fetchRemove(face).?;
+            const candidate = entry.value;
+            std.debug.assert(&candidate.font == loaded);
+            db.metrics.loaded_bytes -= candidate.data.len;
+            db.metrics.probe_releases +|= 1;
+            db.metrics.probe_released_bytes +|= candidate.data.len;
+            sources.release(candidate.source);
+            db.gpa.destroy(candidate);
+        }
+        return covered;
+    }
+
+    fn styleScore(style: font.Style, weight: u16, italic: bool) u32 {
+        return @as(u32, @intCast(@abs(@as(i32, style.weight) - @as(i32, weight)))) + @as(u32, if (style.italic == italic) 0 else 1000);
+    }
+
+    fn findCluster(db: *Db, primary: ?u32, text: []const u8, weight: u16, italic: bool) ?u32 {
+        if (primary) |face| if (db.covers(face, text)) return face;
+        for (db.fallback_names) |name| if (db.family(name, weight, italic)) |face| if (db.covers(face, text)) return face;
+        for (fallbacks) |name| if (db.family(name, weight, italic)) |face| if (db.covers(face, text)) return face;
+        // Already loaded faces cost no additional source memory. Pick the best
+        // matching style deterministically, not hash-table iteration order.
+        var best: ?u32 = null;
+        var best_score: u32 = std.math.maxInt(u32);
+        for (db.faces.items, 0..) |face, i| {
+            if (!db.loaded.contains(@intCast(i))) continue;
+            const rank = styleScore(face.style, weight, italic);
+            if (rank < best_score and db.covers(@intCast(i), text)) {
+                best = @intCast(i);
+                best_score = rank;
+            }
+        }
+        if (best != null) return best;
+        // At most 48 additional families are inspected, using each family's
+        // nearest style; large font installations cannot cause unbounded loads.
         var tries: usize = 0;
-        for (0..db.faces.items.len) |i| {
-            if (tries >= 48) break;
-            if (db.loaded.contains(@intCast(i))) continue;
-            if (i > 0 and std.mem.eql(u8, db.faces.items[i - 1].style.name(), db.faces.items[i].style.name())) continue;
+        var tried: [Limits.arbitrary_probes]u32 = undefined;
+        for (db.faces.items, 0..) |face, i| {
+            if (i > 0 and std.ascii.eqlIgnoreCase(db.faces.items[i - 1].style.name(), face.style.name())) continue;
+            const candidate = db.family(face.style.name(), weight, italic) orelse continue;
+            if (db.loaded.contains(candidate)) continue;
+            if (std.mem.indexOfScalar(u32, tried[0..tries], candidate) != null) continue;
+            if (tries >= Limits.arbitrary_probes) {
+                if (db.metrics.last_missing == .none) db.metrics.last_missing = .probe_limit;
+                break;
+            }
+            tried[tries] = candidate;
             tries += 1;
-            const face = db.faces.items[i];
-            const data = face.read(db) catch continue;
-            defer db.gpa.free(data);
-            const f = font.Font.init(data, face.index) catch continue;
-            if (f.glyphIndex(cp) != 0) return @intCast(i);
+            if (db.covers(candidate, text)) return candidate;
         }
         return null;
     }
