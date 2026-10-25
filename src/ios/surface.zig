@@ -101,7 +101,7 @@ pub const Surface = struct {
         };
         self.ctx = .init(gpa, &self.text);
         objc.setZig(uiview, self);
-        objc.msg(void, uiview, "setMultipleTouchEnabled:", .{objc.NO});
+        objc.msg(void, uiview, "setMultipleTouchEnabled:", .{objc.YES});
         const layer = objc.msg(objc.Object, uiview, "layer", .{});
         objc.msg(void, layer, "addSublayer:", .{renderer.layer});
         keys.attach(self);
@@ -213,6 +213,7 @@ pub const Surface = struct {
         c.safe_area = self.safeArea();
         const root: ui.View = if (self.full_bleed) self.view else .init(self, insideSafeArea);
         const r = frame_mod.run(c, root, &self.text, &self.instances, self.size, self.scale, self.theme(), dt, now - self.start_time);
+        @import("../play.zig").paint(self.gpa, &self.instances);
         if (self.dead) {
             // The view closed its window: nothing left to draw into.
             pool.pop();

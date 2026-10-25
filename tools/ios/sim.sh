@@ -28,5 +28,14 @@ codesign --force --sign - --timestamp=none "$tmp/$name" >/dev/null
 # The Simulator keeps its own copy.
 xcrun simctl install booted "$tmp/$name"
 rm -rf "$tmp"
+# Under `zig build --watch` the step has to end for the build to watch
+# again: the app runs on, its output in this terminal, until a change
+# builds and launches it again (which ends the one before) or Ctrl-C.
+case "$(ps -o args= -p "$PPID" 2>/dev/null)" in
+*" --watch"*)
+	xcrun simctl launch --console --terminate-running-process booted "$id" "$@" </dev/null &
+	exit 0
+	;;
+esac
 # Arguments after the bundle's id go to the app (--nanoui-snapshot=..., ...).
 exec xcrun simctl launch --console-pty --terminate-running-process booted "$id" "$@"

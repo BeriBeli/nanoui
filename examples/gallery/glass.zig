@@ -23,6 +23,9 @@ pub const Demo = struct {
             d.ready = true;
         }
         const th = c.theme;
+        // The page's width: beside the sidebar, or all of a phone's.
+        const compact = @import("phone.zig").compact(c);
+        const w = if (compact) c.size.w else c.size.w - 200;
         const page = ui.div(c).grow().hFull().clip();
         defer page.end();
         {
@@ -42,20 +45,20 @@ pub const Demo = struct {
         }
         {
             const f = motion.frame(c, .{ .initial = .{ .y = -30, .opacity = 0, .scale = 0.96 }, .transition = .{ .spring = motion.Spring.bouncy } });
-            const bar = ui.div(c).absolute().offset(20, 20).w(c.size.w - 240).h(60).row().itemsCenter().gap(10).px(10).rounded(30).glass(.{}).motion(f);
+            const bar = ui.div(c).absolute().offset(20, 20).w(w - 40).h(60).row().itemsCenter().gap(10).px(10).rounded(30).glass(.{}).motion(f);
             defer bar.end();
             _ = kit.tabs(c, &.{ "Photos", "Albums", "Search" }, &d.tab, .{ .variant = .glass });
             ui.spacer(c);
-            ui.label(c, c.print("{d} taps", .{d.taps}));
+            if (!compact) ui.label(c, c.print("{d} taps", .{d.taps}));
             const m = kit.iconButton(c, "ellipsis", .{ .glass = true, .pill = true });
             if (m.clicked) d.menu = !d.menu;
             d.menu_at = m.rect;
-            if (kit.button(c, "Tap", .{ .glass = true, .variant = .primary, .pill = true }).clicked) d.taps += 1;
+            if (!compact and kit.button(c, "Tap", .{ .glass = true, .variant = .primary, .pill = true }).clicked) d.taps += 1;
         }
         {
             // A pane of clear glass, floating.
             const float = motion.keyframes(c, .{ .values = &.{ .{ .y = 0 }, .{ .y = -10 }, .{ .y = 0 } }, .duration = 4, .repeat = null });
-            const pane = ui.div(c).absolute().offset(c.size.w - 380, 150).w(140).h(140).rounded(36).glass(.{ .style = .clear }).itemsCenter().justifyCenter().control().motion(float);
+            const pane = ui.div(c).absolute().offset(w - @as(f32, if (compact) 170 else 180), 150).w(140).h(140).rounded(36).glass(.{ .style = .clear }).itemsCenter().justifyCenter().control().motion(float);
             defer pane.end();
             if (pane.clicked()) d.toaster.push(.{ .status = .info, .title = "Clear glass", .message = "It floats over whatever scrolls under it.", .duration = 3 });
             ui.text(c, "Clear", .{ .size = 15, .weight = .semibold, .color = .white });

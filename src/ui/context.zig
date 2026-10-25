@@ -18,6 +18,8 @@ pub const Content = union(enum) {
     icon: Icon,
     image: Image,
     texture: Texture,
+    /// What a canvas draws (`ui.canvas`), at points within its box.
+    canvas: *const @import("draw.zig").Canvas,
 
     /// One of this frame's textures (`Context.textures`), the part `uv`
     /// (0 to 1) of it shown.
@@ -35,6 +37,9 @@ pub const Content = union(enum) {
         opacity: f32 = 1,
         /// Its shape (alpha) filled with this color: a monochrome mark.
         tint: ?types.Color = null,
+        /// Drawn on whole pixels: a picture made at the screen's own
+        /// size (an icon from SVG), so nothing blurs it.
+        snap: bool = false,
     };
 
     pub const Icon = struct {

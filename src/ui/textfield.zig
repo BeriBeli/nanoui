@@ -108,6 +108,10 @@ pub const Options = struct {
     /// (or Option-Return) starts a new line, Return still submits.
     multiline: bool = false,
     max_lines: u16 = 8,
+    /// Its lines' height in points (`TextStyle.line_height`); 0 is the font's.
+    line_height: f32 = 0,
+    /// The placeholder's color; the theme's muted text if null.
+    placeholder_color: ?types.Color = null,
 };
 
 pub const Result = struct {
@@ -259,7 +263,7 @@ const bullets = "•••••••••••••••••••••
 
 pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
     const th = c.theme;
-    const style: types.TextStyle = .{ .size = opts.size };
+    const style: types.TextStyle = .{ .size = opts.size, .line_height = opts.line_height };
     const pad_x: f32 = if (opts.bare) 0 else 10;
     const pad_y: f32 = if (opts.bare) 2 else 7;
     const multi = opts.multiline and !opts.password;
@@ -301,7 +305,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
     e.anchor = @min(e.anchor, buffer.len);
     // A multiline field wraps at last frame's width (unknown at first).
     const wrap_w: f32 = if (it.rect) |r| @max(1, r.w - 2 * pad_x) else 1e6;
-    const lh_ = c.text.font(style).lineHeight();
+    const lh_ = c.text.lineHeight(style);
     // Where the wheel scrolled a multiline field; the caret before edits.
     if (multi) if (c.scroll.get(it.id)) |v| {
         e.scroll_y = v;
@@ -436,7 +440,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         // Past its most lines it scrolls: the wheel's, and a scrollbar.
         c.node(i).style.scroll = lines.len > opts.max_lines;
         const follow = result.changed or e.caret != caret_before[0] or e.anchor != caret_before[1] or buffer.len != caret_before[2];
-        const d = lines_mod.draw(c, s, e, style, lines, view_h, focused, follow, result.vim_normal, opts.placeholder, opts.suggestion);
+        const d = lines_mod.draw(c, s, e, style, lines, view_h, focused, follow, result.vim_normal, opts.placeholder, opts.placeholder_color orelse th.muted, opts.suggestion);
         c.scroll.put(c.gpa, it.id, e.scroll_y) catch {};
         result.line = d.line;
         result.lines = d.lines;
@@ -454,7 +458,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         return result;
     }
     const shown = shownOf(s, opts.password, bullets);
-    const lh = c.text.font(style).lineHeight();
+    const lh = c.text.lineHeight(style);
     const caret_x = c.text.caretX(shown, style, shownIndex(s, opts.password, e.caret));
     // Keep the caret in view.
     const view_w = if (it.rect) |r| @max(0, r.w - 2 * pad_x) else 0;
@@ -472,7 +476,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         _ = c.leaf(.{ .absolute = true, .width = .{ .px = x1 - x0 }, .height = .{ .px = lh }, .radius = 2, .background = th.accent.alpha(0.3), .offset = .{ .x = x0 - e.scroll_x } }, .none, null);
     }
     if (s.len == 0) {
-        _ = c.leaf(.{ .offset = .{ .x = -e.scroll_x } }, .{ .text = .{ .str = opts.placeholder, .style = style, .color = th.muted } }, null);
+        _ = c.leaf(.{ .offset = .{ .x = -e.scroll_x } }, .{ .text = .{ .str = opts.placeholder, .style = style, .color = opts.placeholder_color orelse th.muted } }, null);
     } else {
         _ = c.leaf(.{ .offset = .{ .x = -e.scroll_x } }, .{ .text = .{ .str = shown, .style = style, .color = th.text } }, null);
         if (opts.suggestion.len > 0 and !opts.password and focused and e.caret == s.len)

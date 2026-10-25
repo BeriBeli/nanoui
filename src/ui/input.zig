@@ -151,6 +151,11 @@ pub const Input = struct {
     released: bool = false,
     click_count: u32 = 0,
     scroll: types.Point = .{},
+    /// A pinch in this event (two fingers on a touch screen, a trackpad's
+    /// magnify): how much it scaled by (1: none), about `mouse`.
+    zoom: f32 = 1,
+    /// How far two fingers moved together in this event.
+    pan: types.Point = .{},
     key: ?Key = null,
     /// Text typed or pasted in this event.
     chars: []const u8 = "",
@@ -174,6 +179,8 @@ pub const Input = struct {
         i.pressed = false;
         i.released = false;
         i.scroll = .{};
+        i.zoom = 1;
+        i.pan = .{};
         i.key = null;
         i.chars = "";
         i.ops = &.{};

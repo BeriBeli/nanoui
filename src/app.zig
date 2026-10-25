@@ -146,6 +146,7 @@ pub const App = struct {
         // Quit before the loop started: nothing to run.
         if (self.stopping) return;
         self.running = true;
+        if (self.flags.play) |steps| @import("play.zig").start(self, steps);
         objc.msg(void, self.nsapp, "run", .{});
         self.running = false;
     }

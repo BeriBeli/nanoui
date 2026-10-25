@@ -135,6 +135,7 @@ pub const App = struct {
         if (self.flags.snapshot) |path| return dev.snapshot(self, path);
         if (self.stopping) return;
         self.running = true;
+        if (self.flags.play) |steps| @import("../play.zig").start(self, steps);
         _ = defineClasses();
         const name = objc.nsString("NanoUIAppDelegate");
         _ = UIApplicationMain(_NSGetArgc().*, _NSGetArgv().*, null, name);

@@ -1,4 +1,4 @@
-//! Text where nanoui shapes it itself (Linux, Windows, and macOS built
+//! Text where nanoui shapes it itself (Linux, Windows, Android, and macOS built
 //! with `-Dportable=true`): the installed TrueType fonts (`tt/fontdb.zig`),
 //! characters to glyphs with kerning and fallback fonts for characters a
 //! font lacks, greedy wrapping at spaces, carets, and the glyph atlas.
@@ -118,6 +118,7 @@ pub const TextSystem = struct {
     }
 
     pub fn lineHeight(self: *TextSystem, style: types.TextStyle) f32 {
+        if (style.line_height > 0) return style.line_height * self.zoom;
         const lh = self.font(style).lineHeight();
         return if (style.leading == 1) lh else @ceil(lh * style.leading);
     }

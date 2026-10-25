@@ -44,6 +44,13 @@ pub const Sink = struct {
     upload: *const fn (ctx: *anyopaque, x: u32, y: u32, w: u32, h: u32, bgra: []const u8) void,
 };
 
+pub const SvgSpec = struct {
+    width: u32,
+    height: u32,
+    /// `currentColor`, straight RGBA.
+    current: [4]f32,
+};
+
 pub const Images = struct {
     gpa: std.mem.Allocator,
     /// Every picture decoded, by key (null: it can't be).
@@ -55,6 +62,9 @@ pub const Images = struct {
     /// BGRA, `size` × `size`; empty until a picture comes.
     pixels: []u8 = &.{},
     entries: std.AutoHashMapUnmanaged(u64, ?Entry) = .empty,
+    /// Pictures drawn from SVG (`ui.svg`), by key: the size and color they
+    /// are drawn at, so they are drawn again the same if they're let go.
+    svgs: std.AutoHashMapUnmanaged(u64, SvgSpec) = .empty,
     shelf_x: u32 = 0,
     shelf_y: u32 = 0,
     shelf_h: u32 = 0,
@@ -68,6 +78,7 @@ pub const Images = struct {
     pub fn deinit(im: *Images) void {
         if (im.pixels.len > 0) im.gpa.free(im.pixels);
         im.entries.deinit(im.gpa);
+        im.svgs.deinit(im.gpa);
         for (im.decoded.values()) |d| if (d) |x| im.gpa.free(x.bgra);
         im.decoded.deinit(im.gpa);
     }
@@ -76,7 +87,7 @@ pub const Images = struct {
     /// Sizing a picture needs only this: it is packed when drawn.
     pub fn info(im: *Images, k: u64, bytes: []const u8) ?Decoded {
         if (im.decoded.get(k)) |d| return d;
-        const d = load(im.gpa, bytes) catch null;
+        const d = (if (im.svgs.get(k)) |spec| drawSvg(im.gpa, bytes, spec) else load(im.gpa, bytes)) catch null;
         if (d) |x| im.kept_bytes += x.bgra.len;
         im.decoded.put(im.gpa, k, d) catch {
             if (d) |x| im.gpa.free(x.bgra);
@@ -95,6 +106,13 @@ pub const Images = struct {
             } else i += 1;
         }
         return d;
+    }
+
+    /// The SVG document `bytes` drawn at `spec`'s size and color, as
+    /// picture `k`: decoded once, then packed when drawn like any other.
+    pub fn infoSvg(im: *Images, k: u64, bytes: []const u8, spec: SvgSpec) ?Decoded {
+        im.svgs.put(im.gpa, k, spec) catch return null;
+        return im.info(k, bytes);
     }
 
     /// The atlas as the CPU renderer reads it.
@@ -163,6 +181,11 @@ pub const Images = struct {
         im.resets +%= 1;
     }
 };
+
+fn drawSvg(gpa: std.mem.Allocator, bytes: []const u8, spec: SvgSpec) !Decoded {
+    const px = try @import("svg.zig").render(gpa, bytes, .{ .width = spec.width, .height = spec.height, .current = spec.current });
+    return .{ .width = spec.width, .height = spec.height, .w = spec.width, .h = spec.height, .bgra = px };
+}
 
 const Raw = struct { width: u32, height: u32, bgra: []u8 };
 

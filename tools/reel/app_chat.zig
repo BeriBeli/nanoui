@@ -1,6 +1,7 @@
 //! A chat, for the reel: messages spring in from below and the ones above
 //! glide up to make room (presence and layout), the typing dots bounce in
-//! a loop (keyframes), and Send gives under a press.
+//! a loop (keyframes), and Send wakes when there's a draft and gives under
+//! a press.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -74,5 +75,5 @@ pub fn view(c: *ui.Context, s: *State, t: f32) void {
         defer field.end();
         if (s.draft.len > 0) ui.text(c, s.draft, .{ .size = 14 }) else ui.text(c, "Message Design team", .{ .size = 14, .color = th.muted });
     }
-    _ = kit.iconButton(c, "arrow.up", .{ .variant = .primary, .pill = true });
+    _ = kit.iconButton(c, "arrow.up", .{ .variant = .primary, .pill = true, .disabled = s.draft.len == 0 });
 }

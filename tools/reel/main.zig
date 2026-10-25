@@ -29,7 +29,7 @@ const Target = union(enum) {
     other_theme,
 };
 
-const Act = enum { none, click, send, lift_ship, lift_docs, play, next, save, morph };
+const Act = enum { none, click, lift_ship, lift_docs, play, next, save, morph };
 
 const Move = struct { at: f32, dur: f32, to: Target, act: Act = .none };
 
@@ -38,7 +38,7 @@ const moves = [_]Move{
     .{ .at = at.trade + 1.5, .dur = 0.6, .to = .{ .text = "1M" }, .act = .click },
     .{ .at = at.trade + 2.9, .dur = 0.4, .to = .{ .text = "1Y" }, .act = .click },
     // Chat: Send.
-    .{ .at = at.chat + 2.0, .dur = 0.5, .to = .{ .point = .{ 987, 611 } }, .act = .send },
+    .{ .at = at.chat + 2.0, .dur = 0.5, .to = .{ .point = .{ 987, 611 } }, .act = .click },
     // Board: a card lifted and carried to Done, another to In progress.
     .{ .at = at.board + 0.4, .dur = 0.6, .to = .{ .text = "Ship ui.motion" }, .act = .lift_ship },
     .{ .at = at.board + 1.3, .dur = 0.6, .to = .{ .point = .{ 999, 203 } } },
@@ -93,6 +93,11 @@ fn events(d: *Director, now: f32, prev: f32) void {
         d.chat.shown = 4;
     }
     if (crossed(prev, now, at.chat + 1.6)) d.chat.draft = "Looks great. Ship it.";
+    // Sent as Send is let go, so its press shows before it dims again.
+    if (crossed(prev, now, at.chat + 2.65)) {
+        d.chat.shown = 5;
+        d.chat.draft = "";
+    }
     if (crossed(prev, now, at.chat + 2.9)) d.chat.typing = true;
     if (crossed(prev, now, at.chat + 3.7)) {
         d.chat.typing = false;
@@ -159,10 +164,6 @@ const Script = struct {
                 t.ctx.pointerDown();
                 s.held = 4;
                 switch (m.act) {
-                    .send => {
-                        d.chat.shown = 5;
-                        d.chat.draft = "";
-                    },
                     .lift_ship => d.board.lifted = 0,
                     .lift_docs => d.board.lifted = 1,
                     .play => d.music.playing = true,

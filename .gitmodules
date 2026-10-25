@@ -7,3 +7,6 @@
 [submodule "apps/nanostudio"]
 	path = apps/nanostudio
 	url = https://github.com/justrach/nanostudio.git
+[submodule "apps/nanofly"]
+	path = apps/nanofly
+	url = https://github.com/justrach/nanofly.git

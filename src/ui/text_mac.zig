@@ -158,6 +158,7 @@ pub const TextSystem = struct {
 
     /// A line's height in `style`, its leading applied.
     pub fn lineHeight(self: *TextSystem, style: types.TextStyle) f32 {
+        if (style.line_height > 0) return style.line_height * self.zoom;
         const lh = self.font(style).lineHeight();
         return if (style.leading == 1) lh else @ceil(lh * style.leading);
     }

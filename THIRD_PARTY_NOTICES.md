@@ -59,6 +59,14 @@ avatars and form fields, rewritten for nanoui. GPUI Kit is licensed under
 the Apache License 2.0, kept verbatim with its copyright line in
 [`third_party/licenses/GPUI-Kit-Apache-2.0.txt`](third_party/licenses/GPUI-Kit-Apache-2.0.txt).
 
+## http-zig
+
+On Linux and Windows, `nanoui.http` uses
+[http-zig](https://github.com/justrach/http-zig), Copyright (c) 2026 Rach
+Pradhan, under the MIT License; its `src/tls_client.zig` is derived from Zig's
+standard library TLS client (MIT, Zig contributors). It is a dependency
+(`build.zig.zon`), fetched only for those targets, not copied here.
+
 ## Apps
 
 [nanoterm](https://github.com/justrach/nanoterm) and

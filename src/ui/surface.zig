@@ -189,6 +189,7 @@ pub const Surface = struct {
         self.last_frame_time = now;
         c.reduced_motion = reduceMotion();
         const r = frame_mod.run(c, self.view, &self.text, &self.instances, self.size, self.scale, self.theme(), dt, now - self.start_time);
+        @import("../play.zig").paint(self.gpa, &self.instances);
         self.renderer.syncImages(&self.text.images);
         self.renderer.textures = c.textures.items;
         self.renderer.draw(self.instances.items, self.atlasTexture(), self.size, c.theme.background);
@@ -293,6 +294,7 @@ const view_methods = [_]objc.Method{
                 .{ .name = "mouseMoved:", .imp = &mouseMoved, .types = "v@:@" },
                 .{ .name = "mouseExited:", .imp = &mouseExited, .types = "v@:@" },
                 .{ .name = "scrollWheel:", .imp = &scrollWheel, .types = "v@:@" },
+                .{ .name = "magnifyWithEvent:", .imp = &magnify, .types = "v@:@" },
                 .{ .name = "keyDown:", .imp = &keyDown, .types = "v@:@" },
                 .{ .name = "paste:", .imp = &paste, .types = "v@:@" },
                 .{ .name = "setFrameSize:", .imp = &setFrameSize, .types = "v@:{CGSize=dd}" },
@@ -382,6 +384,14 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
         s.ctx.input.scroll = .{ .y = dy };
         s.frame();
     }
+}
+
+/// A trackpad's pinch: `input.zoom`, about the pointer.
+fn magnify(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
+    const s = surfaceOf(obj) orelse return;
+    s.setMouse(event);
+    s.ctx.input.zoom = @floatCast(@max(0.1, 1 + objc.msg(f64, event, "magnification", .{})));
+    s.frame();
 }
 
 fn keyDown(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {

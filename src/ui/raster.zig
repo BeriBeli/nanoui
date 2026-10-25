@@ -4,6 +4,7 @@
 //! no GPU renderer, and the Tester renders with it there. A test proves it
 //! matches the Metal renderer.
 const std = @import("std");
+const shapes = @import("raster_shapes.zig");
 const types = @import("types.zig");
 const gpu = @import("gpu.zig");
 const glass = @import("glass.zig");
@@ -176,11 +177,13 @@ fn drawOne(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, pictures: Pictur
     }
     if (i.kind == gpu.Kind.shadow) return shadow(out, i, scale, b);
     if (i.kind == gpu.Kind.glass) return pane(out, i, scale, b);
+    if (i.kind == gpu.Kind.segment) return shapes.segment(out, i, scale, b);
+    if (i.kind == gpu.Kind.triangle) return shapes.triangle(out, i, scale, b);
     quad(out, i, scale, b);
 }
 
 /// Blends a premultiplied color over the pixel at byte `at`.
-inline fn blend(bytes: []u8, at: usize, r: f32, g: f32, bl: f32, a: f32) void {
+pub inline fn blend(bytes: []u8, at: usize, r: f32, g: f32, bl: f32, a: f32) void {
     if (a <= 0) return;
     const inv = 1 - a;
     const d = bytes[at..][0..4];
@@ -190,7 +193,7 @@ inline fn blend(bytes: []u8, at: usize, r: f32, g: f32, bl: f32, a: f32) void {
     d[3] = @intFromFloat(@min(255, a * 255 + @as(f32, @floatFromInt(d[3])) * inv + 0.5));
 }
 
-fn smoothstep(e0: f32, e1: f32, x: f32) f32 {
+pub fn smoothstep(e0: f32, e1: f32, x: f32) f32 {
     const t = std.math.clamp((x - e0) / (e1 - e0), 0, 1);
     return t * t * (3 - 2 * t);
 }
@@ -211,7 +214,7 @@ fn roundedBox(px: f32, py: f32, hw: f32, hh: f32, r: f32) [2]f32 {
 /// How much of the pixel at `wx`, `wy` the instance's clip lets through:
 /// all of it, but in the clip's rounded corners (as the shader's
 /// `clip_cover`).
-inline fn clipCover(i: *const gpu.Instance, wx: f32, wy: f32, inv: f32) f32 {
+pub inline fn clipCover(i: *const gpu.Instance, wx: f32, wy: f32, inv: f32) f32 {
     if (i.clip_round <= 0) return 1;
     const round = gpu.clipCorners(i.clip_round);
     const c = i.clip;
@@ -308,7 +311,9 @@ fn glyph(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, scale: f32, b: [4]
             const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
             const tx = (wx - i.rect[0]) / i.rect[2];
             const u = i.uv[0] + (i.uv[2] - i.uv[0]) * tx;
-            const a = sample(mask, u, v) * c[3] * clipCover(i, wx, wy, inv);
+            var a = sample(mask, u, v) * c[3] * clipCover(i, wx, wy, inv);
+            // A truncated line fading out, as the shader fades it.
+            if (i.border_width > 0) a *= std.math.clamp((i.radius - wx) / i.border_width, 0, 1);
             blend(out.bytes, row + x * 4, c[0] * a, c[1] * a, c[2] * a, a);
         }
     }

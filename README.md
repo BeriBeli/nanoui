@@ -13,7 +13,7 @@
 <p align="center">
   <img alt="macOS · Linux · Windows" src="https://img.shields.io/badge/macOS%20·%20Linux%20·%20Windows-555">
   <img alt="Apps of about 0.7 MB" src="https://img.shields.io/badge/apps-~0.7%20MB-44cc11">
-  <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-44cc11">
+  <img alt="One dependency, the author's own http-zig, on Linux and Windows only" src="https://img.shields.io/badge/dependencies-1%20(own)-44cc11">
   <img alt="Built in Zig 0.17" src="https://img.shields.io/badge/built%20in-Zig%200.17-f7a41d?logo=zig&logoColor=white">
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
@@ -136,10 +136,15 @@ the state.
   `ui.div(c).row().gap(8).bg(...)`.
 - **Lists:** a virtualized list (`ui.list`) that builds only the rows in view.
 - **Text:** wrapping, monospace, weights and rich spans, with text that can
-  be selected and copied like a terminal's.
+  be selected and copied like a terminal's; lines too long for their box
+  end in an ellipsis or fade out (`.truncate`); fonts an app bundles are
+  found by family like installed ones (`ui.registerFont`).
 - **Controls:** buttons, checkboxes, toggles, sliders, progress bars,
   segmented controls, badges, and text fields with IME support.
 - **Images:** pictures decoded once and packed into an atlas.
+- **SVG:** icons and marks from SVG files (`ui.svg`), drawn by nanoui at
+  the screen's density on every platform and tinted to follow the theme:
+  paths, shapes, fills, strokes, transforms and inherited styles.
 - **Look:** light and dark themes that follow the system, eased animations,
   Gaussian shadows, and Liquid Glass.
 - **Pointer:** hover that follows ancestry as CSS's `:hover` does, double
@@ -315,24 +320,31 @@ zig-out/bin/gallery --nanoui-snapshot=shot.png --nanoui-script="click:Tasks;type
 zig-out/bin/hello --nanoui-eval='nanoui.call("Greeter.greet","Ada").then(v => { nanoui.log(v); nanoui.window.close() })'
 ```
 
+`--nanoui-wait=SECONDS` runs the event loop first, drawing the view as it
+goes, so what an app loads as it draws (pictures, a map's tiles, replies)
+is there in the snapshot.
+
 ## Platforms
 
 nanoui loads what each platform has instead of linking it, so every platform
-builds from any machine (iOS from a Mac with Xcode, for its SDK). On a Mac, `zig build -Dtarget=x86_64-linux-gnu` or
+builds from any machine (iOS from a Mac with Xcode, for its SDK; Android with
+Android's SDK and NDK). On a Mac, `zig build -Dtarget=x86_64-linux-gnu` or
 `-Dtarget=x86_64-windows-gnu` makes a Linux or Windows binary.
 
-| | macOS | iOS | Linux | Windows |
-|---|---|---|---|---|
-| windows, input, timers | AppKit | UIKit: screens over each other, touch, keyboards | GTK 4, else GTK 3 (loaded with `dlopen`) | Win32 |
-| text | CoreText | CoreText | nanoui's TrueType reader (`src/ui/tt/`) | the same |
-| rendering | Metal | Metal | OpenGL 3.3 in a GtkGLArea; CPU (`src/ui/raster.zig`) without one | CPU, shown by Direct3D 11 (a DXGI flip swap chain; GDI without it) |
-| icons | SF Symbols | SF Symbols | line icons drawn by nanoui (`src/ui/icons.zig`) | the same |
-| pages (webview) | WKWebView | not yet | not yet | not yet |
-| menus | the menu bar | a keyboard's shortcuts | accelerators | accelerators |
+| | macOS | iOS | Android | Linux | Windows |
+|---|---|---|---|---|---|
+| windows, input, timers | AppKit | UIKit: screens over each other, touch, keyboards | NativeActivity: screens over each other, touch, keyboards, Back | GTK 4, else GTK 3 (loaded with `dlopen`) | Win32 |
+| text | CoreText | CoreText | nanoui's TrueType reader, Android's fonts | nanoui's TrueType reader (`src/ui/tt/`) | the same |
+| rendering | Metal | Metal | OpenGL ES 3; CPU without it | OpenGL 3.3 in a GtkGLArea; CPU (`src/ui/raster.zig`) without one | CPU, shown by Direct3D 11 (a DXGI flip swap chain; GDI without it) |
+| icons | SF Symbols | SF Symbols | line icons drawn by nanoui (`src/ui/icons.zig`) | the same | the same |
+| SVG (`ui.svg`) | drawn by nanoui (`src/ui/svg.zig`) | the same | the same | the same | the same |
+| pages (webview) | WKWebView | not yet | not yet | not yet | not yet |
+| menus | the menu bar | a keyboard's shortcuts | a keyboard's shortcuts | accelerators | accelerators |
+| HTTP (`nanoui.http`) | NSURLSession | NSURLSession | http-zig, names looked up by Android | [http-zig](https://github.com/justrach/http-zig): HTTP/2 over TLS, a thread per request | the same |
 
 The CPU renderer matches the Metal one pixel for pixel, and a test compares
-them; another compares the OpenGL renderer with the CPU one, in a context
-without a window. `NANOUI_RENDERER=cpu` draws on the CPU where OpenGL is. `zig build test -Dportable=true` runs the Linux and Windows text and
+them; others compare the OpenGL renderer with the CPU one, with OpenGL 3.3
+and with OpenGL ES 3, in a context without a window. `NANOUI_RENDERER=cpu` draws on the CPU where OpenGL is. `zig build test -Dportable=true` runs the Linux and Windows text and
 renderer on a Mac. Linux is also tested in a container
 (`tools/linux.Dockerfile`: GTK 3 and 4, fonts and a virtual display).
 
@@ -346,12 +358,30 @@ stays anchored (`src/windows/d3d.zig`).
 
 ### iOS
 
+<p align="center"><img src="docs/images/ios-gallery.gif" width="300" alt="The gallery example on an iPhone in the iOS Simulator: pages pushed from a list, buttons, toggles, a task list typed into, a 10 000-row list filtered, springs, and Liquid Glass"></p>
+
+The gallery on an iPhone ([MP4](docs/images/ios-gallery.mp4)). It's the same
+Zig view as on the Mac. When the window is narrow it shows its pages as a list
+and pushes each one in. The app played this itself:
+
+```sh
+xcrun simctl launch booted dev.nanoui.gallery "--nanoui-play=tap:Tasks;tap:Something to do;type:Record a demo;tap:Add"
+xcrun simctl io booted recordVideo demo.mov
+```
+
+`--nanoui-play` takes the same steps as `--nanoui-script` (tap, type, key,
+scroll, wait) and plays them in the running app at a person's pace, with a
+dot where each finger lands. It works on macOS too. The Simulator can record
+its screen but can't tap, so this is how you make demo videos.
+
 Native UI runs on iOS with the Mac's renderer and text, Metal and
 CoreText; `src/ios/` puts them on UIKit. The first window fills the
 screen, and windows shown after it cover it until they close or hide; a
 window over another needs its own way to close (no swipe down). A finger
 is the pointer: it presses and drags, and scrolls what it moves up or
-down over, flinging as iOS's scroll views do. A hardware keyboard's
+down over, flinging as iOS's scroll views do. Two fingers pinch: their
+spread and movement come to the view as `input.zoom` and `input.pan` (a
+trackpad's pinch does on the Mac). A hardware keyboard's
 keys and shortcuts work as on the Mac, and a focused text field brings
 up the software keyboard. Views are laid out inside the safe area,
 clear of the status bar, the home indicator and the keyboard; a window
@@ -361,7 +391,14 @@ clear itself with `ui.div(c).safeArea()`.
 ```sh
 zig build $(sh tools/ios/zig-lib.sh) -Dtarget=aarch64-ios-simulator               # zig-out/ios/Counter.app, Gallery.app
 zig build $(sh tools/ios/zig-lib.sh) run-gallery -Dtarget=aarch64-ios-simulator   # in the booted Simulator
+zig build $(sh tools/ios/zig-lib.sh) run-gallery -Dtarget=aarch64-ios-simulator --watch   # again on every save
 ```
+
+With `--watch`, each save builds the app, installs it and launches it
+again in the Simulator in a few seconds, its output in the same terminal.
+A release build (`-Doptimize=ReleaseSmall`) is stripped of its local
+symbols as it is bundled: the counter is about 300 KB, the gallery about
+500 KB, the renderer, text and widgets in them.
 
 You need Xcode for the iOS SDK. Zig 0.17.0's std can't build programs for
 iOS as it ships: it takes iOS for a system that can replace its process
@@ -372,11 +409,17 @@ first after `zig build`.
 
 `-Dtarget=aarch64-ios` builds for devices: sign the app with your team
 (Xcode, or `codesign` and a provisioning profile) and install it with
-`xcrun devicectl`. An app bundles itself in its own build.zig:
+`xcrun devicectl`. Zig compiles a device's program and Apple's linker
+(`xcrun clang`) links it: an iPhone refuses a program Zig 0.17.0 links,
+before it runs and without a crash report. An app bundles itself in its
+own build.zig:
 
 ```zig
 const bundle = @import("nanoui").ios.app(b, exe, .{ .name = "Notes", .id = "com.example.notes" });
 ```
+
+An app that makes its own bundle takes its program from
+`ios.executable(b, exe)`.
 
 Zig 0.17 makes iOS 18 the lowest an app runs on unless the target names
 one, and the app's Info.plist follows it. nanoui runs on iOS 15 and
@@ -385,6 +428,32 @@ reaches those devices.
 
 Not on iOS yet: pages, input methods that compose text (Japanese,
 Chinese), keys repeating while held, and more than one window on an iPad.
+
+### Android
+
+<p align="center"><img src="docs/images/android-gallery.png" width="720" alt="The gallery example on an Android phone in the emulator: its pages as a list, the task list typed into with the software keyboard up, and the list in dark mode"></p>
+
+Native UI runs on Android with Linux's text and renderer, nanoui's TrueType
+reader on Android's fonts and OpenGL ES 3 (or the CPU), on the NDK's
+NativeActivity (`src/android/`). There's no Java of nanoui's own: the app's
+`main` runs on a thread of its own with a looper, and Java's classes are
+called through JNI where Android has no C interface (the clipboard, links,
+dialogs, the software keyboard, the insets). As on iOS, the first window
+fills the screen and windows shown after it cover it; a finger presses,
+scrolls and flings, two pinch, and views are laid out clear of the bars,
+the cutout and the keyboard. Back is Escape for the top window's view
+first (a menu, a sheet or a page closes), then closes the top window, and
+on the last one sends the app to the background. A mouse hovers, clicks
+and scrolls; dark mode, rotation and density follow the system.
+
+```sh
+zig build -Dtarget=aarch64-linux-android               # zig-out/android/Counter.apk, Gallery.apk
+sh tools/android/emulator.sh                           # an emulator without a window
+zig build run-gallery -Dtarget=aarch64-linux-android   # installed and run there (or on a phone), its log here
+```
+
+What you need, an app's build.zig, and what isn't there yet:
+[docs/android.md](docs/android.md).
 
 ## Apps
 
@@ -404,7 +473,10 @@ Chinese), keys repeating while held, and more than one window on an iPad.
       <a href="https://github.com/justrach/nanostudio"><img src="docs/images/nanostudio-dark.png" alt="nanostudio: the editor with a zoom on the timeline"></a>
       <p><a href="https://github.com/justrach/nanostudio"><strong>nanostudio</strong></a>: a screen recorder and editor. It records a display or a window with its sound, then zooms where you clicked. You can trim, speed up and dress the take, and export it. Every frame, preview and export alike, is a nanoui view.</p>
     </td>
-    <td width="50%" valign="top"></td>
+    <td width="50%" valign="top">
+      <a href="https://github.com/justrach/nanofly"><img src="docs/images/nanofly.png" alt="nanofly: Singapore to San Francisco over the Pacific, with the weather's radar, and the flight's card in a sheet of glass" width="300"></a>
+      <p><a href="https://github.com/justrach/nanofly"><strong>nanofly</strong></a>: flights, live, on a map, for iPhone (and the Mac), after Flighty. It finds a flight's route, follows it from open ADS-B data, and says when it lands by each airport's clock, with the weather there. Its map, drawn by <code>ui.canvas</code>, has the night's side, the weather's radar and the planes around; you can pinch it, and its card is a sheet of Liquid Glass you drag between three heights.</p>
+    </td>
   </tr>
 </table>
 
@@ -474,7 +546,7 @@ Rules for working here, by hand or with an agent, are in
 
 nanoui is a subset of what full frameworks offer. Pages work only on macOS so
 far, and there's no accessibility, notifications, channels or plugins yet,
-and bundling only for iOS. Apps update themselves from GitHub releases on macOS
+and bundling only for iOS and Android. Apps update themselves from GitHub releases on macOS
 (`nanoui.Updater`). Bound methods run on the main thread.
 
 ## License

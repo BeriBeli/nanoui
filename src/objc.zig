@@ -257,7 +257,12 @@ pub fn Block(comptime Ctx: type, comptime Args: []const type) type {
                         Trampoline.call(b, .{ a, c });
                     }
                 }.f,
-                else => @compileError("objc.Block: up to 2 arguments"),
+                3 => &struct {
+                    fn f(b: *const Self, a: Args[0], c: Args[1], d: Args[2]) callconv(.c) void {
+                        Trampoline.call(b, .{ a, c, d });
+                    }
+                }.f,
+                else => @compileError("objc.Block: up to 3 arguments"),
             };
             return .{ .isa = @ptrCast(&_NSConcreteStackBlock), .invoke = @ptrCast(invoke), .descriptor = &descriptor_value, .ctx = ctx };
         }

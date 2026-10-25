@@ -24,6 +24,7 @@ const App = struct {
     number: f64 = 0,
     page: usize = 0,
     loading: bool = false,
+    off: bool = true,
     toaster: kit.Toaster,
 
     fn view(a: *App, c: *ui.Context) void {
@@ -33,7 +34,7 @@ const App = struct {
             const r = ui.div(c).row().gap(8).itemsCenter();
             defer r.end();
             if (kit.button(c, "Count", .{ .variant = .primary, .loading = a.loading, .tooltip = "Adds one" }).clicked) a.clicks += 1;
-            if (kit.button(c, "Off", .{ .disabled = true }).clicked) a.clicks += 100;
+            if (kit.button(c, "Off", .{ .disabled = a.off }).clicked) a.clicks += 100;
             if (kit.button(c, "Ask", .{}).clicked) a.dialog = true;
             const m = kit.button(c, "Menu", .{ .icon_after = "chevron.down" });
             if (m.clicked) a.menu = !a.menu;
@@ -94,6 +95,32 @@ test "buttons, tabs, radios, the number input and pagination" {
     try testing.expectEqual(@as(usize, 2), a.page);
     try t.screenshot("/tmp/nanoui-kit.png");
     try testing.expect(t.hasText("AL"));
+}
+
+/// The opacity of the button labeled `label`.
+fn buttonOpacity(t: *ui.Tester, label: []const u8) f32 {
+    for (t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, label)) return t.ctx.nodes.items[n.parent].style.opacity,
+        else => {},
+    };
+    return -1;
+}
+
+test "a button fades between disabled and enabled" {
+    var a: App = undefined;
+    var t: ui.Tester = undefined;
+    try setup(&a, &t);
+    defer teardown(&a, &t);
+    // Disabled from its first frame: no fade in from enabled.
+    try testing.expectApproxEqAbs(@as(f32, 0.45), buttonOpacity(&t, "Off"), 0.001);
+    a.off = false;
+    t.advance(0.1);
+    const mid = buttonOpacity(&t, "Off");
+    try testing.expect(mid > 0.45 and mid < 1);
+    t.settle(1);
+    try testing.expectApproxEqAbs(@as(f32, 1), buttonOpacity(&t, "Off"), 0.001);
+    try t.clickText("Off");
+    try testing.expectEqual(@as(u32, 100), a.clicks);
 }
 
 test "a dialog: Cancel, OK, Escape and the dimming close it" {

@@ -1,8 +1,9 @@
-// shader.metal and glass.metal in GLSL 3.30, for the OpenGL renderer
-// (opengl.zig), which builds each program from this file with one of
-// QUAD_VS, QUAD_FS, GLASS_FS, PASS_VS, DOWN_FS or BLUR_FS defined. The
-// frame is drawn upside down as GL keeps it (row 0 at the bottom); the
-// instances' points and the backdrop's texels are top down, as in Metal.
+// shader.metal and glass.metal in GLSL 3.30, and GLSL ES 3.00 for OpenGL
+// ES (Android), for the OpenGL renderer (opengl.zig), which builds each
+// program from this file with one of QUAD_VS, QUAD_FS, GLASS_FS, PASS_VS,
+// DOWN_FS or BLUR_FS defined. The frame is drawn upside down as GL keeps
+// it (row 0 at the bottom); the instances' points and the backdrop's
+// texels are top down, as in Metal.
 
 #if defined(QUAD_VS)
 layout(location = 0) in vec4 a_rect;   // x, y, w, h in points
@@ -27,6 +28,18 @@ void main() {
     // Shadows reach three standard deviations past their box.
     float grow = a_misc.z == 2.0 ? a_misc.y * 3.0 : 0.0;
     vec2 p = a_rect.xy - grow + corner * (a_rect.zw + 2.0 * grow);
+    if (a_misc.z == 6.0) {
+        // A box along the line, a point past its round ends.
+        vec2 a = a_uv.xy, b = a_uv.zw;
+        float len = length(b - a);
+        vec2 u = len > 0.0 ? (b - a) / len : vec2(1.0, 0.0);
+        vec2 n = vec2(-u.y, u.x);
+        float e = a_misc.y * 0.5 + 1.0;
+        p = mix(a - u * e, b + u * e, corner.x) + n * (corner.y * 2.0 - 1.0) * e;
+    } else if (a_misc.z == 7.0) {
+        // The triangle itself: its third corner twice.
+        p = gl_VertexID == 0 ? a_uv.xy : (gl_VertexID == 1 ? a_uv.zw : a_border_color.xy);
+    }
     gl_Position = vec4(p / viewport * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
     v_local = p - a_rect.xy;
     v_world = p;
@@ -132,10 +145,60 @@ float shadow_alpha(vec2 p, vec2 half_size, float corner, float sigma) {
     return alpha;
 }
 
+// A line, as shader.metal's line_color, smoothed by its exact gradient.
+vec4 line_color() {
+    vec2 a = i_uv.xy, ab = i_uv.zw - i_uv.xy;
+    float len2 = dot(ab, ab);
+    float t = len2 > 0.0 ? clamp(dot(v_world - a, ab) / len2, 0.0, 1.0) : 0.0;
+    vec2 off = v_world - (a + ab * t);
+    float d = length(off);
+    float grad = d > 0.0 ? (abs(off.x) + abs(off.y)) / d : 1.0;
+    float aa = max(grad / scale, 0.0001) * 0.5;
+    float hw = i_misc.y * 0.5;
+    float cover = 1.0 - smoothstep(hw - aa, hw + aa, d);
+    float on = i_border_color.x, gap = i_border_color.y;
+    if (on > 0.0 && gap > 0.0) {
+        float len = sqrt(len2);
+        // Along the line unclamped: its ends are cut square, as its dashes.
+        float along = (len > 0.0 ? dot(v_world - a, ab) / len : 0.0) + i_border_color.z;
+        float m = along - (on + gap) * floor(along / (on + gap));
+        float e = min(m, on - m);
+        float ug = len > 0.0 ? (abs(ab.x) + abs(ab.y)) / len : 0.0;
+        float ea = max(ug / scale, 0.0001) * 0.5;
+        cover *= smoothstep(-ea, ea, e);
+    }
+    float alpha = i_color.a * cover;
+    return vec4(i_color.rgb * alpha, alpha);
+}
+
+// A triangle, as shader.metal's triangle_color.
+vec4 triangle_color() {
+    vec2 v[3] = vec2[3](i_uv.xy, i_uv.zw, i_border_color.xy);
+    float area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[1].y - v[0].y) * (v[2].x - v[0].x);
+    float side = area < 0.0 ? -1.0 : 1.0;
+    uint edges = uint(i_border_color.z);
+    float cover = 1.0;
+    for (int k = 0; k < 3; k++) {
+        if ((edges & (1u << uint(k))) == 0u) continue;
+        vec2 p = v[k], q = v[(k + 1) % 3];
+        vec2 e = q - p;
+        float len = max(length(e), 0.0001);
+        float d = side * (e.x * (v_world.y - p.y) - e.y * (v_world.x - p.x)) / len;
+        float aa = max((abs(e.x) + abs(e.y)) / len / scale, 0.0001) * 0.5;
+        cover *= smoothstep(-aa, aa, d);
+    }
+    float alpha = i_color.a * cover;
+    return vec4(i_color.rgb * alpha, alpha);
+}
+
 vec4 shade() {
     float kind = i_misc.z;
+    if (kind == 6.0) return line_color();
+    if (kind == 7.0) return triangle_color();
     if (kind == 1.0) {
         float a = texture(atlas, v_uv).r * i_color.a;
+        // A truncated line fading out: `border_width` points before `radius`.
+        if (i_misc.y > 0.0) a *= clamp((i_misc.x - v_world.x) / i_misc.y, 0.0, 1.0);
         return vec4(i_color.rgb * a, a);
     }
     vec2 half_size = i_rect.zw * 0.5;
@@ -148,6 +211,10 @@ vec4 shade() {
     if (kind == 3.0) {
         // Premultiplied already: scaled by the corners' coverage and opacity.
         vec4 px = texture(images, v_uv);
+#ifdef GL_ES
+        // BGRA pixels, which OpenGL ES took for RGBA.
+        px = px.bgra;
+#endif
         // Tinted: the picture's shape in one color (a mark following the theme).
         if (i_border_color.a > 0.0) {
             float a = px.a * i_border_color.a * coverage * i_color.a;

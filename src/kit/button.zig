@@ -93,7 +93,8 @@ pub fn button(c: *ui.Context, label: []const u8, opts: Options) ui.Interaction {
         n.style.background = null;
         n.style.border = null;
     }
-    n.style.opacity = if (opts.disabled) 0.45 else 1;
+    // Disabled and enabled fade into each other.
+    n.style.opacity = ui.motion.number(c, "opacity", if (opts.disabled) 0.45 else 1, .{ .tween = .{ .duration = 0.2, .ease = .ease_out } });
     // A spring and a bounce on release: a solid button gives under a press;
     // glass swells, as iOS's interactive glass does.
     const pressed_to: f32 = if (opts.glass) 1.08 else 0.965;

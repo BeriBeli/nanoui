@@ -20,6 +20,26 @@ extern "c" fn CTFontCopyFamilyName(font: cf.CTFontRef) cf.CFStringRef;
 extern "c" fn CTFontGetSymbolicTraits(font: cf.CTFontRef) u32;
 extern "c" fn CFStringCompare(a: cf.CFStringRef, b: cf.CFStringRef, options: u64) cf.CFIndex;
 
+extern "c" fn CGDataProviderCreateWithData(info: ?*anyopaque, data: [*]const u8, size: usize, release: ?*const anyopaque) ?*anyopaque;
+extern "c" fn CGFontCreateWithDataProvider(provider: *anyopaque) ?*anyopaque;
+extern "c" fn CTFontManagerRegisterGraphicsFont(font: *anyopaque, err: ?*?*anyopaque) bool;
+extern "c" fn CFErrorGetCode(err: *anyopaque) cf.CFIndex;
+
+/// Registers a font file's bytes (kept by the caller) for this process, so
+/// its family is found by name.
+pub fn registerData(bytes: []const u8) bool {
+    const provider = CGDataProviderCreateWithData(null, bytes.ptr, bytes.len, null) orelse return false;
+    defer cf.CFRelease(provider);
+    const font = CGFontCreateWithDataProvider(provider) orelse return false;
+    defer cf.CFRelease(font);
+    var err: ?*anyopaque = null;
+    if (CTFontManagerRegisterGraphicsFont(font, &err)) return true;
+    const e = err orelse return false;
+    defer cf.CFRelease(e);
+    // Already registered (the same font twice) is as good.
+    return CFErrorGetCode(e) == 105;
+}
+
 const Transform = extern struct { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 };
 const italic_trait: u32 = 1 << 0;
 const kCFNumberFloat64Type: cf.CFIndex = 6;

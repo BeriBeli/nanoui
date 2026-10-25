@@ -1,4 +1,4 @@
-//! Icons where there are no SF Symbols (Linux, Windows): the symbols
+//! Icons where there are no SF Symbols (Linux, Windows, Android): the symbols
 //! nanoui's widgets and apps name, drawn as line icons on a 24-unit grid
 //! in the manner of Lucide — strokes with round ends, a few filled shapes,
 //! and cut-outs for the filled ones — by the TrueType rasterizer.

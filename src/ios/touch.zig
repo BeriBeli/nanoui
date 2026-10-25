@@ -3,7 +3,8 @@
 //! mostly up or down over something that scrolls scrolls it instead, and
 //! the press it began is canceled; let go moving, it keeps going and slows
 //! as iOS's scroll views do (a fling), until a touch stops it or it meets
-//! an end.
+//! an end. A second finger makes a pinch: the press is canceled, and the
+//! fingers' spread and movement come as `input.zoom` and `input.pan`.
 const std = @import("std");
 const objc = @import("../objc.zig");
 const cf = @import("../ui/cf.zig");
@@ -22,8 +23,13 @@ const min_speed: f32 = 20;
 const away: types.Point = .{ .x = -1e6, .y = -1e6 };
 
 pub const State = struct {
-    /// The finger followed (the first down); others are ignored.
+    /// The finger followed (the first down).
     finger: ?objc.Object = null,
+    /// The second finger down, pinching with the first; a third is ignored.
+    second: ?objc.Object = null,
+    /// The pinch's last spread and middle.
+    spread: f32 = 0,
+    middle: types.Point = .{},
     start: types.Point = .{},
     last: types.Point = .{},
     last_time: f64 = 0,
@@ -103,8 +109,12 @@ fn began(obj: objc.Object, _: objc.SEL, touches: objc.Object, event: ?objc.Objec
     defer s.leave();
     modifiers(s, event);
     const st = &s.touch;
-    if (st.finger != null) return;
-    const t = objc.msg(objc.Object, touches, "anyObject", .{});
+    if (st.finger) |first| {
+        if (st.second == null) pinchStart(s, first, other(touches, first) orelse return);
+        return;
+    }
+    const all = objc.msg(objc.Object, touches, "allObjects", .{});
+    const t = objc.msg(objc.Object, all, "objectAtIndex:", .{@as(objc.NSUInteger, 0)});
     const p = location(s, t);
     const was_flinging = st.flinging();
     st.* = .{ .finger = t, .start = p, .last = p, .last_time = cf.CACurrentMediaTime(), .stopper = was_flinging };
@@ -115,6 +125,71 @@ fn began(obj: objc.Object, _: objc.SEL, touches: objc.Object, event: ?objc.Objec
     s.ctx.input.click_count = @intCast(@max(1, objc.msg(objc.NSUInteger, t, "tapCount", .{})));
     s.ctx.pointerDown();
     s.frame();
+    // Two fingers at once: a pinch from the start.
+    if (objc.msg(objc.NSUInteger, all, "count", .{}) > 1)
+        pinchStart(s, t, objc.msg(objc.Object, all, "objectAtIndex:", .{@as(objc.NSUInteger, 1)}));
+}
+
+/// A touch of `touches` other than `t`.
+fn other(touches: objc.Object, t: objc.Object) ?objc.Object {
+    const all = objc.msg(objc.Object, touches, "allObjects", .{});
+    const n = objc.msg(objc.NSUInteger, all, "count", .{});
+    var i: objc.NSUInteger = 0;
+    while (i < n) : (i += 1) {
+        const o = objc.msg(objc.Object, all, "objectAtIndex:", .{i});
+        if (o != t) return o;
+    }
+    return null;
+}
+
+fn spreadOf(a: types.Point, b: types.Point) f32 {
+    return @sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+}
+
+/// A second finger came: what the first pressed or scrolled is let go.
+fn pinchStart(s: *Surface, first: objc.Object, second: objc.Object) void {
+    const st = &s.touch;
+    const a = location(s, first);
+    const b = location(s, second);
+    if (!st.scrolling and !st.stopper) {
+        s.ctx.input.mouse = away;
+        s.ctx.updateHot();
+        s.ctx.pointerUp();
+        s.frame();
+    }
+    st.second = second;
+    st.scrolling = false;
+    st.stopper = true;
+    st.spread = spreadOf(a, b);
+    st.middle = .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
+}
+
+/// The fingers moved: by how much they spread, about their middle.
+fn pinchMove(s: *Surface, first: objc.Object, second: objc.Object) void {
+    const st = &s.touch;
+    const a = location(s, first);
+    const b = location(s, second);
+    const d = spreadOf(a, b);
+    const m: types.Point = .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2 };
+    const in = &s.ctx.input;
+    in.mouse = m;
+    in.zoom = if (st.spread > 1 and d > 1) d / st.spread else 1;
+    in.pan = .{ .x = m.x - st.middle.x, .y = m.y - st.middle.y };
+    st.spread = d;
+    st.middle = m;
+    s.frame();
+    s.ctx.input.mouse = away;
+}
+
+/// One of the pinch's fingers went: the other presses nothing until it goes.
+fn pinchEnd(s: *Surface, left: objc.Object) void {
+    const st = &s.touch;
+    const p = location(s, left);
+    st.finger = left;
+    st.second = null;
+    st.start = p;
+    st.last = p;
+    st.last_time = cf.CACurrentMediaTime();
 }
 
 fn moved(obj: objc.Object, _: objc.SEL, touches: objc.Object, event: ?objc.Object) callconv(.c) void {
@@ -122,6 +197,7 @@ fn moved(obj: objc.Object, _: objc.SEL, touches: objc.Object, event: ?objc.Objec
     defer s.leave();
     modifiers(s, event);
     const st = &s.touch;
+    if (st.second) |second| return pinchMove(s, st.finger.?, second);
     const t = followed(s, touches) orelse return;
     const p = location(s, t);
     const now = cf.CACurrentMediaTime();
@@ -160,6 +236,18 @@ fn ended(obj: objc.Object, _: objc.SEL, touches: objc.Object, event: ?objc.Objec
     defer s.leave();
     modifiers(s, event);
     const st = &s.touch;
+    if (st.second) |second| {
+        const first = st.finger.?;
+        const first_up = objc.msg(objc.BOOL, touches, "containsObject:", .{first});
+        const second_up = objc.msg(objc.BOOL, touches, "containsObject:", .{second});
+        if (first_up and second_up) {
+            st.* = .{};
+            return lift(s);
+        }
+        if (first_up) return pinchEnd(s, second);
+        if (second_up) return pinchEnd(s, first);
+        return;
+    }
     const t = followed(s, touches) orelse return;
     st.finger = null;
     if (st.scrolling) {
@@ -190,7 +278,8 @@ fn cancelled(obj: objc.Object, _: objc.SEL, touches: objc.Object, _: ?objc.Objec
     const s = Surface.enter(obj) orelse return;
     defer s.leave();
     const st = &s.touch;
-    _ = followed(s, touches) orelse return;
+    const second = st.second != null and objc.msg(objc.BOOL, touches, "containsObject:", .{st.second.?});
+    if (followed(s, touches) == null and !second) return;
     const pressing = !st.scrolling and !st.stopper;
     st.* = .{};
     // The system took the touch (a gesture, a call): nothing is clicked.
