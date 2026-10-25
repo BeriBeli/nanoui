@@ -1,18 +1,16 @@
-//! Native UI on Linux: a GtkGLArea that the OpenGL renderer draws
-//! (`glarea.zig`), or, without OpenGL 3.3, a GtkDrawingArea showing frames
-//! the CPU renderer draws (only what changed: ui.Canvas; cairo puts them on
-//! screen, at the monitor's scale); fed the pointer, the wheel, keys and an
-//! input method's text. Frames run on input and while something animates
-//! (a tick callback); idle, nothing runs. GTK 3's event signals are here;
-//! GTK 4's controllers in surface_gtk4.zig.
+//! Native UI on Linux: a GtkDrawingArea that shows frames the CPU renderer
+//! draws (cairo puts them on screen, at the monitor's scale), fed the
+//! pointer, the wheel, keys and an input method's text. Frames run on
+//! input and while something animates (a tick callback); idle, nothing runs.
 const std = @import("std");
 const gtk = @import("gtk.zig");
 const ui = @import("../ui/ui.zig");
 const types = @import("../ui/types.zig");
 const gpu = @import("../ui/gpu.zig");
-const canvas = @import("../ui/canvas.zig");
-const glarea = @import("glarea.zig");
-const opengl = @import("../ui/opengl.zig");
+const damage = @import("../ui/damage.zig");
+const presentation = @import("presentation.zig");
+const input = @import("input.zig");
+const InputHandler = input.Handler(gtk);
 const text = @import("../ui/text.zig");
 const frame_mod = @import("../ui/frame.zig");
 const ctx_mod = @import("../ui/context.zig");
@@ -30,24 +28,25 @@ pub const Surface = struct {
     ctx: Context,
     view: ui.View,
     instances: std.ArrayList(gpu.Instance) = .empty,
-    pixels: canvas.Canvas = .{},
-    /// The area is a GL area: OpenGL draws it, once it is realized.
-    gl: bool,
-    renderer: ?opengl.Renderer = null,
-    /// OpenGL failed: the drawing area replaces the GL area soon.
-    fallback: c_uint = 0,
+    cpu: damage.Surface = .{},
+    previous_theme: ?Theme = null,
+    theme_generation: u64 = 0,
+    /// Instances changed since the pixels were drawn.
+    stale: bool = true,
     size: types.Size = .{},
     scale: f32 = 1,
     last_frame_time: f64 = 0,
     start_time: f64,
     tick: c_uint = 0,
     idle: c_uint = 0,
+    present_idle: c_uint = 0,
     /// A frame asked for later (`frameIn`).
     later: c_uint = 0,
     theme_override: ?Theme = null,
     cursor: ctx_mod.Cursor = .arrow,
-    /// Text the input method committed during this key event.
-    committed: std.ArrayList(u8) = .empty,
+    input_state: input.State = .{},
+    /// A shortcut may close the window while an owned input event is in flight.
+    dead: bool = false,
     /// The press that started a double or triple click was already sent.
     pressed: bool = false,
 
@@ -56,13 +55,11 @@ pub const Surface = struct {
         const self = try gpa.create(Surface);
         errdefer gpa.destroy(self);
         const g = &gtk.api;
-        const gl_area = if (window.app.cpu_only) null else glarea.new();
-        const area = gl_area orelse g.gtk_drawing_area_new();
+        const area = g.gtk_drawing_area_new();
         self.* = .{
             .gpa = gpa,
             .window = window,
             .area = area,
-            .gl = gl_area != null,
             .im = g.gtk_im_multicontext_new(),
             .text = .init(gpa),
             .ctx = undefined,
@@ -71,23 +68,9 @@ pub const Surface = struct {
             .start_time = clock.now(),
         };
         self.ctx = .init(gpa, &self.text);
-        if (gtk.v4) {
-            @import("surface_gtk4.zig").attach(self);
-            return self;
-        }
-        self.attach(area);
-        gtk.connect(self.im, "commit", @ptrCast(&onCommit), self);
-        gtk.v3.gtk_container_add(window.gtkwindow.?, area);
-        return self;
-    }
-
-    /// Feeds `area`'s events to the surface, and draws it (GTK 3).
-    fn attach(self: *Surface, area: *gtk.Widget) void {
         gtk.v3.gtk_widget_set_can_focus(area, 1);
-        gtk.v3.gtk_widget_add_events(area, gtk.pointer_motion_mask | gtk.button_press_mask | gtk.button_release_mask | gtk.key_press_mask | gtk.leave_notify_mask | gtk.focus_change_mask | gtk.scroll_mask | gtk.smooth_scroll_mask);
-        if (self.gl) {
-            gtk.connect(area, "render", @ptrCast(&onRender), self);
-        } else gtk.connect(area, "draw", @ptrCast(&onDraw), self);
+        gtk.v3.gtk_widget_add_events(area, gtk.pointer_motion_mask | gtk.button_press_mask | gtk.button_release_mask | gtk.key_press_mask | (1 << 11) | gtk.leave_notify_mask | gtk.focus_change_mask | gtk.scroll_mask | gtk.smooth_scroll_mask);
+        gtk.connect(area, "draw", @ptrCast(&onDraw), self);
         gtk.connect(area, "size-allocate", @ptrCast(&onSize), self);
         gtk.connect(area, "button-press-event", @ptrCast(&onPress), self);
         gtk.connect(area, "button-release-event", @ptrCast(&onRelease), self);
@@ -95,29 +78,51 @@ pub const Surface = struct {
         gtk.connect(area, "leave-notify-event", @ptrCast(&onLeave), self);
         gtk.connect(area, "scroll-event", @ptrCast(&onScroll), self);
         gtk.connect(area, "key-press-event", @ptrCast(&onKey), self);
+        gtk.connect(area, "key-release-event", @ptrCast(&onKeyRelease), self);
         gtk.connect(area, "focus-in-event", @ptrCast(&onFocusIn), self);
         gtk.connect(area, "focus-out-event", @ptrCast(&onFocusOut), self);
         gtk.connect(area, "realize", @ptrCast(&onRealize), self);
+        gtk.connect(self.im, "commit", @ptrCast(&onCommit), self);
+        gtk.connect(self.im, "preedit-changed", @ptrCast(&onPreedit), self);
+        gtk.v3.gtk_container_add(window.gtkwindow.?, area);
+        return self;
     }
 
     pub fn destroy(self: *Surface) void {
         const g = &gtk.api;
         if (self.tick != 0) g.gtk_widget_remove_tick_callback(self.area, self.tick);
         if (self.idle != 0) _ = g.g_source_remove(self.idle);
+        if (self.present_idle != 0) _ = g.g_source_remove(self.present_idle);
         if (self.later != 0) _ = g.g_source_remove(self.later);
-        if (self.fallback != 0) _ = g.g_source_remove(self.fallback);
-        // While the area is still realized: its context frees the renderer's.
-        if (self.renderer) |*r| {
-            glarea.api.gtk_gl_area_make_current(self.area);
-            r.deinit();
+        self.tick = 0;
+        self.idle = 0;
+        self.present_idle = 0;
+        self.later = 0;
+        if (self.input_state.draining) {
+            self.dead = true;
+            return;
         }
         g.g_object_unref(self.im);
         self.instances.deinit(self.gpa);
-        self.committed.deinit(self.gpa);
-        self.pixels.deinit(self.gpa);
+        self.input_state.deinit(self.gpa);
+        self.cpu.deinit(self.gpa);
         self.ctx.deinit();
         self.text.deinit();
         self.gpa.destroy(self);
+    }
+
+    pub fn inputAlive(self: *Surface) bool {
+        return !self.dead;
+    }
+    pub fn finishInput(self: *Surface) void {
+        if (self.dead) self.destroy();
+    }
+
+    pub fn inputFailed(_: *Surface, err: anyerror) void {
+        std.log.err("nanoui: input delivery failed: {s}", .{@errorName(err)});
+    }
+    pub fn readClipboard(self: *Surface) !?[]u8 {
+        return @import("desktop.zig").clipboard.readText(self.gpa);
     }
 
     fn theme(self: *Surface) Theme {
@@ -125,26 +130,25 @@ pub const Surface = struct {
         return if (@import("desktop.zig").isDark()) Theme.dark_theme else Theme.light;
     }
 
-    /// Builds, lays out and paints a frame; what it changed is drawn when
-    /// GTK draws.
+    /// Builds, lays out and paints a frame; it is drawn when GTK draws.
     pub fn frame(self: *Surface) void {
-        if (self.size.w <= 0 or self.size.h <= 0) return;
+        if (self.dead or self.size.w <= 0 or self.size.h <= 0) return;
+        @import("frame_schedule.zig").consume(gtk, &self.idle);
         const c = &self.ctx;
+        const screen = gtk.v3.gtk_widget_get_screen(self.area);
+        c.points_to_logical = @import("typography.zig").pointsToLogical(gtk.v3.gdk_screen_get_resolution(screen));
         const now = clock.now();
         const dt: f32 = if (self.last_frame_time > 0) @floatCast(@min(now - self.last_frame_time, 0.1)) else 1.0 / 60.0;
         self.last_frame_time = now;
         const r = frame_mod.run(c, self.view, &self.text, &self.instances, self.size, self.scale, self.theme(), dt, now - self.start_time);
-        if (self.gl) {
-            glarea.api.gtk_gl_area_queue_render(self.area);
-        } else if (self.pixels.damage(self.shown())) |d| {
-            // The points around those pixels.
-            const x0 = @floor(@as(f32, @floatFromInt(d[0])) / self.scale);
-            const y0 = @floor(@as(f32, @floatFromInt(d[1])) / self.scale);
-            const x1 = @ceil(@as(f32, @floatFromInt(d[2])) / self.scale);
-            const y1 = @ceil(@as(f32, @floatFromInt(d[3])) / self.scale);
-            // GTK 4 redraws widgets whole (the canvas still draws only the damage).
-            if (gtk.v4) gtk.api.gtk_widget_queue_draw(self.area) else gtk.v3.gtk_widget_queue_draw_area(self.area, @intFromFloat(x0), @intFromFloat(y0), @intFromFloat(x1 - x0), @intFromFloat(y1 - y0));
+        if (self.dead) return;
+        if (c.focused_text) |ft| {
+            const caret = ft.caret_rect;
+            const rect: gtk.Rectangle = .{ .x = @intFromFloat(caret.x), .y = @intFromFloat(caret.y), .width = @intFromFloat(@max(1, caret.w)), .height = @intFromFloat(@max(1, caret.h)) };
+            gtk.api.gtk_im_context_set_cursor_location(self.im, &rect);
         }
+        self.stale = true;
+        if (self.present_idle == 0) self.present_idle = gtk.api.g_idle_add(onPresent, self);
         self.updateCursor();
         const more = c.animating or r.hot_changed;
         if (more and self.tick == 0) {
@@ -171,7 +175,9 @@ pub const Surface = struct {
     fn onIdle(data: ?*anyopaque) callconv(.c) c_int {
         const self: *Surface = @ptrCast(@alignCast(data));
         self.idle = 0;
-        self.frame();
+        const has_input = self.input_state.head < self.input_state.events.items.len;
+        InputHandler.drain(self);
+        if (!has_input) self.frame();
         return 0;
     }
 
@@ -183,14 +189,49 @@ pub const Surface = struct {
         return 0;
     }
 
-    pub fn shown(self: *Surface) canvas.Frame {
-        return .{ .instances = self.instances.items, .text = &self.text, .clear = self.ctx.theme.background, .size = self.size, .scale = self.scale, .textures = self.ctx.textures.items };
+    // Coalesce CPU rasterization, preserving synchronous input/IME consumption.
+    // Invalidate only changed pixels instead of the entire remote X11 window.
+    fn onPresent(data: ?*anyopaque) callconv(.c) c_int {
+        const self: *Surface = @ptrCast(@alignCast(data));
+        self.present_idle = 0;
+        if (self.stale) if (self.render()) |dirty| presentation.queue(self.area, dirty, self.scale);
+        return 0;
+    }
+
+    /// Draws the instances into the pixels, sized to the widget.
+    fn render(self: *Surface) ?damage.Damage {
+        const wf = @max(1, @round(self.size.w * self.scale));
+        const hf = @max(1, @round(self.size.h * self.scale));
+        // 2^32 is exact in f32; maxInt(u32) cannot be coerced to f32.
+        if (!std.math.isFinite(wf) or !std.math.isFinite(hf) or wf >= 0x1p32 or hf >= 0x1p32) {
+            self.cpu.invalidate();
+            return null;
+        }
+        var pictures = self.text.images.pictures();
+        pictures.textures = self.ctx.textures.items;
+        if (self.previous_theme == null or !std.meta.eql(self.previous_theme.?, self.ctx.theme)) {
+            self.theme_generation +%= 1;
+            self.previous_theme = self.ctx.theme;
+        }
+        const result = self.cpu.render(self.gpa, self.instances.items, self.text.atlas.mask(), pictures, .{
+            .width = @intFromFloat(wf),
+            .height = @intFromFloat(hf),
+            .scale = self.scale,
+            .clear = gpu.color4(self.ctx.theme.background),
+            .glyph_generation = self.text.atlas.generation,
+            .image_generation = self.text.images.generation,
+            .theme_generation = self.theme_generation,
+        }) catch return null;
+        self.stale = false;
+        return result.damage;
     }
 
     fn updateCursor(self: *Surface) void {
         const want: ctx_mod.Cursor = self.ctx.cursor orelse if (self.ctx.cursor_text) .text else if (self.ctx.cursor_hand) .hand else .arrow;
         if (want == self.cursor) return;
         self.cursor = want;
+        const g = &gtk.api;
+        const win = gtk.v3.gtk_widget_get_window(self.area) orelse return;
         const name: [*:0]const u8 = switch (want) {
             .arrow => "default",
             .hand => "pointer",
@@ -198,26 +239,22 @@ pub const Surface = struct {
             .resize_left_right => "col-resize",
             .resize_up_down => "row-resize",
         };
-        if (gtk.v4) return gtk.v4api.gtk_widget_set_cursor_from_name(self.area, name);
-        const win = gtk.v3.gtk_widget_get_window(self.area) orelse return;
-        gtk.v3.gdk_window_set_cursor(win, gtk.v3.gdk_cursor_new_from_name(gtk.api.gdk_display_get_default(), name));
+        const cursor = gtk.v3.gdk_cursor_new_from_name(g.gdk_display_get_default(), name);
+        gtk.v3.gdk_window_set_cursor(win, cursor);
+        if (cursor) |obj| g.g_object_unref(obj);
     }
 
     fn setMouse(self: *Surface, e: *gtk.Event) void {
         var x: f64 = 0;
         var y: f64 = 0;
         _ = gtk.v3.gdk_event_get_coords(e, &x, &y);
+        self.ctx.input.mouse = .{ .x = @floatCast(x), .y = @floatCast(y) };
         var state: c_uint = 0;
         _ = gtk.v3.gdk_event_get_state(e, &state);
-        self.pointerAt(x, y, state);
-    }
-
-    /// Where the pointer is, and the modifiers held.
-    pub fn pointerAt(self: *Surface, x: f64, y: f64, state: c_uint) void {
-        self.ctx.input.mouse = .{ .x = @floatCast(x), .y = @floatCast(y) };
         self.ctx.input.shift = state & gtk.shift_mask != 0;
         self.ctx.input.cmd = false;
         self.ctx.input.ctrl = state & gtk.control_mask != 0;
+        self.ctx.input.alt = state & (1 << 3) != 0;
     }
 };
 
@@ -227,87 +264,44 @@ fn of(data: ?*anyopaque) *Surface {
 
 fn onRealize(_: *gtk.Widget, data: ?*anyopaque) callconv(.c) void {
     const s = of(data);
+    s.cpu.invalidate();
+    s.stale = true;
     gtk.v3.gtk_im_context_set_client_window(s.im, gtk.v3.gtk_widget_get_window(s.area));
-    glStart(s);
-}
-
-/// The GL area was realized: its renderer, or the CPU's if it can't be had.
-pub fn glStart(s: *Surface) void {
-    if (!s.gl) return;
-    s.renderer = glarea.start(s.area);
-    if (s.renderer != null) {
-        s.ctx.renderer = "OpenGL";
-        s.requestFrame();
-        if (s.window.app.debug) std.debug.print("nanoui: window {x} draws with OpenGL on {s}\n", .{ @intFromPtr(s.window), glarea.gpuName() });
-    } else if (s.fallback == 0) {
-        // Not from inside the area's own signal: the area is replaced soon.
-        s.fallback = gtk.api.g_idle_add(useCpu, s);
-    }
-}
-
-/// OpenGL failed: a drawing area, which the CPU renderer draws, replaces
-/// the GL area.
-fn useCpu(data: ?*anyopaque) callconv(.c) c_int {
-    const s = of(data);
-    const g = &gtk.api;
-    s.fallback = 0;
-    if (s.tick != 0) g.gtk_widget_remove_tick_callback(s.area, s.tick);
-    s.tick = 0;
-    const old = s.area;
-    s.gl = false;
-    s.area = g.gtk_drawing_area_new();
-    if (gtk.v4) {
-        // The window's new child; the GL area goes with being replaced.
-        @import("surface_gtk4.zig").attachArea(s);
-    } else {
-        gtk.v3.gtk_widget_destroy(old);
-        s.attach(s.area);
-        gtk.v3.gtk_container_add(s.window.gtkwindow.?, s.area);
-        glarea.api.gtk_widget_show(s.area);
-    }
-    g.gtk_widget_grab_focus(s.area);
-    return 0;
-}
-
-fn onRender(_: *gtk.Widget, _: *anyopaque, data: ?*anyopaque) callconv(.c) c_int {
-    return @intFromBool(glRender(of(data)));
-}
-
-/// Draws the frame with OpenGL into the framebuffer GTK bound.
-pub fn glRender(s: *Surface) bool {
-    if (s.renderer) |*r| {
-        r.sync(s.text.atlas.mask(), s.text.atlas.generation, s.text.images.pictures(), s.text.images.generation);
-        r.draw(s.instances.items, s.size, s.scale, s.ctx.theme.background, glarea.target());
-        return true;
-    }
-    return false;
 }
 
 fn onDraw(_: *gtk.Widget, cr: *anyopaque, data: ?*anyopaque) callconv(.c) c_int {
-    return @intFromBool(paint(of(data), cr));
-}
-
-/// Puts the frame on `cr`, drawn first if it changed.
-pub fn paint(s: *Surface, cr: *anyopaque) bool {
+    const s = of(data);
     const g = &gtk.api;
-    s.pixels.draw(s.gpa, s.shown());
-    const px = &s.pixels;
-    if (px.bytes.len == 0) return false;
+    if (s.stale or !s.cpu.valid or s.cpu.bytes.len == 0) {
+        const dirty = s.render() orelse return 0;
+        // An exposure can arrive before the presentation idle. Do not lose
+        // changed pixels outside that exposure's clip.
+        presentation.queue(s.area, dirty, s.scale);
+    }
+    const pixels = s.cpu.pixels();
+    if (pixels.bytes.len == 0) return 0;
+    // Exposure reuses CURRENT persistent CPU pixels without rerasterizing.
     // ARGB32 on a little-endian machine is BGRA: the renderer's order.
-    const surf = g.cairo_image_surface_create_for_data(px.bytes.ptr, 0, @intCast(px.width), @intCast(px.height), @intCast(px.width * 4));
+    const surf = g.cairo_image_surface_create_for_data(pixels.bytes.ptr, 0, @intCast(pixels.width), @intCast(pixels.height), @intCast(pixels.width * 4));
     defer g.cairo_surface_destroy(surf);
+    if (g.cairo_surface_status(surf) != 0) {
+        s.cpu.presentationFailed();
+        s.stale = true;
+        return 0;
+    }
     g.cairo_surface_set_device_scale(surf, s.scale, s.scale);
     g.cairo_set_source_surface(cr, surf, 0, 0);
     g.cairo_paint(cr);
-    return true;
+    if (g.cairo_status(cr) != 0 or g.cairo_surface_status(surf) != 0) {
+        s.cpu.presentationFailed();
+        s.stale = true;
+        return 0;
+    }
+    return 1;
 }
 
 fn onSize(w: *gtk.Widget, _: *anyopaque, data: ?*anyopaque) callconv(.c) void {
-    resized(of(data), w);
-}
-
-/// The widget's size or scale changed: a frame at the new one.
-pub fn resized(s: *Surface, w: *gtk.Widget) void {
+    const s = of(data);
     const g = &gtk.api;
     const size: types.Size = .{ .w = @floatFromInt(g.gtk_widget_get_allocated_width(w)), .h = @floatFromInt(g.gtk_widget_get_allocated_height(w)) };
     const scale: f32 = @floatFromInt(@max(1, g.gtk_widget_get_scale_factor(w)));
@@ -324,8 +318,16 @@ fn onPress(w: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int 
     g.gtk_widget_grab_focus(w);
     var button: c_uint = 0;
     _ = gtk.v3.gdk_event_get_button(e, &button);
-    if (button != 1) return 0;
+    if (button < 1 or button > 3) return 0;
+    s.ctx.input.mouse_button = @import("../ui/input.zig").gtkButton(button);
     s.setMouse(e);
+    s.ctx.updateHot();
+    if (button != 1) {
+        s.ctx.input.pressed = true;
+        s.ctx.input.down = true;
+        s.frame();
+        return 1;
+    }
     var count: c_uint = 1;
     _ = gtk.v3.gdk_event_get_click_count(e, &count);
     const kind = gtk.v3.gdk_event_get_event_type(e);
@@ -347,26 +349,25 @@ fn onRelease(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_in
     const s = of(data);
     var button: c_uint = 0;
     _ = gtk.v3.gdk_event_get_button(e, &button);
-    if (button != 1) return 0;
+    if (button < 1 or button > 3) return 0;
+    s.ctx.input.mouse_button = @import("../ui/input.zig").gtkButton(button);
     s.setMouse(e);
-    released(s);
-    return 1;
-}
-
-pub fn released(s: *Surface) void {
+    s.ctx.updateHot();
+    if (button != 1) {
+        s.ctx.input.released = true;
+        s.ctx.input.down = false;
+        s.frame();
+        return 1;
+    }
     s.ctx.updateHot();
     s.ctx.pointerUp();
     s.frame();
+    return 1;
 }
 
 fn onMotion(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
     const s = of(data);
     s.setMouse(e);
-    moved(s);
-    return 1;
-}
-
-pub fn moved(s: *Surface) void {
     const before = s.ctx.hot;
     s.ctx.updateHot();
     if (s.ctx.input.down or s.ctx.hot != before or s.ctx.wants_moves) {
@@ -376,19 +377,17 @@ pub fn moved(s: *Surface) void {
         s.ctx.cursor_text = !s.ctx.cursor_text;
         s.updateCursor();
     }
+    return 1;
 }
 
 fn onLeave(_: *gtk.Widget, _: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
-    left(of(data));
-    return 0;
-}
-
-pub fn left(s: *Surface) void {
+    const s = of(data);
     s.ctx.input.mouse = .{ .x = -1e6, .y = -1e6 };
     if (s.ctx.hot != 0) {
         s.ctx.updateHot();
         s.frame();
     }
+    return 0;
 }
 
 fn onScroll(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
@@ -397,151 +396,52 @@ fn onScroll(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int
     var dx: f64 = 0;
     var dy: f64 = 0;
     var delta: f32 = 0;
+    var horizontal: f32 = 0;
+    var lines: ?f32 = null;
     if (gtk.v3.gdk_event_get_scroll_deltas(e, &dx, &dy) != 0) {
         // Smooth deltas are in lines of about 40 pixels; up is negative.
         delta = @floatCast(-dy * 40);
+        horizontal = @floatCast(-dx * 40);
     } else {
         var dir: c_int = 0;
         _ = gtk.v3.gdk_event_get_scroll_direction(e, &dir);
         delta = if (dir == 0) 48 else if (dir == 1) -48 else 0;
+        horizontal = if (dir == 2) 48 else if (dir == 3) -48 else 0;
+        lines = delta / 48;
     }
-    scrolled(s, delta);
-    return 1;
-}
-
-pub fn scrolled(s: *Surface, delta: f32) void {
-    if (s.ctx.applyScroll(delta)) {
+    if (delta != 0 and s.ctx.applyScroll(delta)) {
         s.frame();
         s.ctx.updateHot();
     } else if (s.ctx.wants_wheel) {
-        s.ctx.input.scroll = .{ .y = delta };
+        s.ctx.input.scroll = .{ .x = horizontal, .y = delta };
+        s.ctx.input.scroll_lines = lines;
         s.frame();
     }
+    return 1;
 }
 
 fn onFocusIn(_: *gtk.Widget, _: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
-    gtk.api.gtk_im_context_focus_in(of(data).im);
+    const s = of(data);
+    gtk.api.gtk_im_context_focus_in(s.im);
     return 0;
 }
 
 fn onFocusOut(_: *gtk.Widget, _: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
-    gtk.api.gtk_im_context_focus_out(of(data).im);
+    const s = of(data);
+    gtk.api.gtk_im_context_focus_out(s.im);
+    gtk.api.gtk_im_context_reset(s.im);
     return 0;
 }
 
 fn onCommit(_: *anyopaque, str: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
-    const s = of(data);
-    s.committed.appendSlice(s.gpa, std.mem.span(str)) catch {};
+    InputHandler.commit(of(data), str);
 }
-
-/// GDK key values of the keys that are not text.
-fn keyOf(keyval: c_uint) ?ctx_mod.Key {
-    return switch (keyval) {
-        0xff08 => .backspace,
-        0xffff => .delete,
-        0xff51 => .left,
-        0xff52 => .up,
-        0xff53 => .right,
-        0xff54 => .down,
-        0xff50 => .home,
-        0xff57 => .end,
-        0xff0d, 0xff8d => .enter,
-        0xff09, 0xfe20 => .tab,
-        0xff1b => .escape,
-        0xff55 => .page_up,
-        0xff56 => .page_down,
-        0xffbe...0xffc9 => @enumFromInt(@intFromEnum(ctx_mod.Key.f1) + (keyval - 0xffbe)),
-        else => null,
-    };
+fn onPreedit(_: *anyopaque, data: ?*anyopaque) callconv(.c) void {
+    InputHandler.preedit(of(data));
 }
-
 fn onKey(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
-    var keyval: c_uint = 0;
-    var state: c_uint = 0;
-    _ = gtk.v3.gdk_event_get_keyval(e, &keyval);
-    _ = gtk.v3.gdk_event_get_state(e, &state);
-    return @intFromBool(keyPress(of(data), keyval, state, e));
+    return InputHandler.press(of(data), e);
 }
-
-/// A key pressed; true if it was taken. GTK 3 passes its event for the
-/// input method; GTK 4's sends typed text to `typed` itself.
-pub fn keyPress(s: *Surface, keyval: c_uint, state: c_uint, e: ?*gtk.Event) bool {
-    const g = &gtk.api;
-    const in = &s.ctx.input;
-    in.shift = state & gtk.shift_mask != 0;
-    in.cmd = false;
-    const ctrl = state & gtk.control_mask != 0;
-    const alt = state & gtk.alt_mask != 0;
-    in.ctrl = ctrl;
-    in.alt = alt;
-    const key = keyOf(keyval);
-    // Key combinations go to the menus' accelerators, then the view.
-    const special: ?u21 = if (key) |k| switch (k) {
-        .up => ui.Shortcut.up,
-        .down => ui.Shortcut.down,
-        .left => ui.Shortcut.left,
-        .right => ui.Shortcut.right,
-        .tab => ui.Shortcut.tab,
-        .escape => ui.Shortcut.escape,
-        .enter => ui.Shortcut.enter,
-        else => null,
-    } else null;
-    const cp: u21 = @intCast(g.gdk_keyval_to_unicode(keyval));
-    const base: u21 = special orelse if (cp < 128) std.ascii.toLower(@intCast(cp)) else cp;
-    if (base != 0 and (ctrl or alt or (special != null and (base == ui.Shortcut.up or base == ui.Shortcut.down or base == ui.Shortcut.tab or base == ui.Shortcut.escape)))) {
-        const sc: ui.Shortcut = .{ .key = base, .ctrl = ctrl, .alt = alt, .shift = in.shift };
-        if (s.window.app.accelerator(sc)) return true;
-        if (ctrl and s.ctx.focused_text != null and editShortcut(s, base)) return true;
-        s.ctx.shortcut_taken = false;
-        in.shortcut = sc;
-        s.frame();
-        in.shortcut = null;
-        if (s.ctx.shortcut_taken) return true;
-    }
-    if (key) |k| {
-        in.key = k;
-        s.frame();
-        return true;
-    }
-    if (ctrl) return false;
-    s.committed.clearRetainingCapacity();
-    const ev = e orelse return false;
-    if (gtk.v3.gtk_im_context_filter_keypress(s.im, ev) == 0 and cp >= 0x20 and cp != 0x7f) {
-        var buf: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(cp, &buf) catch return false;
-        s.committed.appendSlice(s.gpa, buf[0..n]) catch {};
-    }
-    if (s.committed.items.len == 0) return true;
-    in.chars = s.committed.items;
-    s.frame();
-    return true;
-}
-
-/// Ctrl+C, X, V and A in a text field: copy, cut, paste, select all.
-fn editShortcut(s: *Surface, key: u21) bool {
-    const op: ctx_mod.TextOp = switch (key) {
-        'c' => .{ .command = .copy },
-        'x' => .{ .command = .cut },
-        'a' => .{ .command = .select_all },
-        'v' => {
-            const pasted = @import("desktop.zig").clipboard.readText(s.gpa) catch return true;
-            // No text: the view may take Ctrl+V for something else (an image).
-            const t = pasted orelse return false;
-            defer s.gpa.free(t);
-            for (t) |*ch| if (ch.* == '\n' or ch.* == '\r') {
-                ch.* = ' ';
-            };
-            var ops = [1]ctx_mod.TextOp{.{ .insert = t }};
-            s.ctx.input.ops = &ops;
-            s.frame();
-            s.ctx.input.ops = &.{};
-            return true;
-        },
-        else => return false,
-    };
-    var ops = [1]ctx_mod.TextOp{op};
-    s.ctx.input.ops = &ops;
-    s.frame();
-    s.ctx.input.ops = &.{};
-    return true;
+fn onKeyRelease(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int {
+    return InputHandler.release(of(data), e);
 }

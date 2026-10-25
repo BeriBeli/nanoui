@@ -123,6 +123,7 @@ pub const runFor = @import("platform.zig").runFor;
 pub const version = @import("build_options").version;
 
 test {
+    if (@import("builtin").os.tag == .linux) _ = @import("linux/presentation.zig");
     _ = tsgen;
     _ = ui;
     _ = kit;
@@ -158,4 +159,13 @@ test {
     std.testing.refAllDecls(@import("menu.zig").Menu);
     std.testing.refAllDecls(@import("menu.zig").Item);
     std.testing.refAllDecls(@import("tray.zig").Tray);
+}
+
+test {
+    _ = @import("linux/input_check.zig");
+}
+
+test {
+    _ = @import("linux/frame_schedule.zig");
+    _ = @import("linux/typography.zig");
 }

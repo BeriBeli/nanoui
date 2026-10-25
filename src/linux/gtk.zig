@@ -1,4 +1,4 @@
-//! GTK (4 where it's installed, else 3), GDK, GLib and cairo, loaded when
+//! GTK 3 for Letty, GDK, GLib and cairo, loaded when
 //! the app starts (as mygo loads them with purego): no headers and no
 //! libraries at build time, so Linux builds come from any machine. Each
 //! function is looked up by its name from the field of the same name.
@@ -17,6 +17,9 @@ pub const Rectangle = extern struct { x: c_int, y: c_int, width: c_int, height: 
 /// What GTK 3 and 4 both have, alike: GLib, GObject, cairo, and the GTK
 /// calls that didn't change.
 pub const Api = struct {
+    gtk_im_context_reset: *const fn (im: *anyopaque) callconv(.c) void,
+    cairo_status: *const fn (*anyopaque) callconv(.c) c_int,
+    cairo_surface_status: *const fn (*anyopaque) callconv(.c) c_int,
     // GLib, GObject and GIO.
     g_signal_connect_data: *const fn (instance: *anyopaque, signal: [*:0]const u8, handler: Callback, data: ?*anyopaque, destroy: ?*anyopaque, flags: c_uint) callconv(.c) c_ulong,
     g_timeout_add: *const fn (ms: c_uint, func: SourceFn, data: ?*anyopaque) callconv(.c) c_uint,
@@ -77,6 +80,8 @@ pub const Api = struct {
 /// GTK 3's own: its main loop, window placement, events as structs, the
 /// clipboard and dialogs that wait.
 pub const Api3 = struct {
+    gtk_widget_get_screen: *const fn (w: *Widget) callconv(.c) *anyopaque,
+    gdk_screen_get_resolution: *const fn (screen: *anyopaque) callconv(.c) f64,
     gtk_init_check: *const fn (argc: ?*c_int, argv: ?*anyopaque) callconv(.c) c_int,
     gtk_main: *const fn () callconv(.c) void,
     gtk_main_quit: *const fn () callconv(.c) void,
@@ -169,17 +174,10 @@ pub var v4 = false;
 var loaded = false;
 
 /// Loads GTK and what it links (GDK, GLib, cairo): GTK 4 where it's
-/// installed, else GTK 3 (`NANOUI_GTK=3` asks for 3); false when neither is.
+/// installed upstream; Letty requires GTK 3 and returns false when it is missing.
 pub fn load() bool {
     if (loaded) return true;
-    const want3 = if (std.c.getenv("NANOUI_GTK")) |v| std.mem.eql(u8, std.mem.span(v), "3") else false;
-    if (!want3) if (std.c.dlopen("libgtk-4.so.1", .{ .NOW = true, .GLOBAL = true })) |lib| {
-        if (table(Api, lib, &api) and table(Api4, lib, &v4api)) {
-            v4 = true;
-            loaded = true;
-            return true;
-        }
-    };
+    // Letty supports the GTK 3 CPU/X11 path; do not select GTK 4 implicitly.
     const lib = std.c.dlopen("libgtk-3.so.0", .{ .NOW = true, .GLOBAL = true }) orelse return false;
     if (!table(Api, lib, &api) or !table(Api3, lib, &v3)) return false;
     loaded = true;
