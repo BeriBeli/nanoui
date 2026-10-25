@@ -75,6 +75,25 @@ pub const Images = struct {
     /// Emptied during a frame: its earlier pictures must be painted again.
     reset_during_frame: bool = false,
 
+    /// Attach before publishing a surface to callbacks. If a CPU atlas already
+    /// exists, migrate it before releasing its storage: entries keep their UVs.
+    /// Switching GPU sinks has no retained CPU pixels; repack from decoded data.
+    pub fn bindSink(im: *Images, sink: Sink) void {
+        if (im.sink) |old| {
+            if (old.ctx == sink.ctx and old.upload == sink.upload) return;
+            im.empty();
+            im.reset_during_frame = true;
+        }
+        if (im.pixels.len > 0) {
+            const rows = im.shelf_y + im.shelf_h;
+            if (rows > 0) sink.upload(sink.ctx, 0, 0, size, rows, im.pixels[0 .. @as(usize, rows) * size * 4]);
+            im.gpa.free(im.pixels);
+            im.pixels = &.{};
+        }
+        im.sink = sink;
+        im.dirty = null;
+    }
+
     pub fn deinit(im: *Images) void {
         if (im.pixels.len > 0) im.gpa.free(im.pixels);
         im.entries.deinit(im.gpa);

@@ -81,6 +81,9 @@ pub const Surface = struct {
             .start_time = cf.CACurrentMediaTime(),
         };
         self.ctx = .init(gpa, &self.text);
+        // AppKit may draw reentrantly as soon as the view points back to us.
+        // Keep image ownership GPU-only from the very first such frame.
+        self.text.images.bindSink(.{ .ctx = &self.renderer, .upload = metal.Renderer.uploadImage });
         objc.setZig(nsview, self);
         // A layer-hosting view: the Metal layer is ours.
         objc.msg(void, nsview, "setLayer:", .{renderer.layer});
@@ -101,8 +104,6 @@ pub const Surface = struct {
             objc.msg(void, link, "addToRunLoop:forMode:", .{ loop, NSRunLoopCommonModes });
             self.display_link = link;
         }
-        // Pictures go straight to the GPU: no copy of their atlas in memory.
-        self.text.images.sink = .{ .ctx = &self.renderer, .upload = @import("metal.zig").Renderer.uploadImage };
         self.updateGeometry();
         self.frame();
         return self;

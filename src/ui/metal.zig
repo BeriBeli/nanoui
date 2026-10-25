@@ -102,7 +102,9 @@ pub const Renderer = struct {
     }
 
     pub fn syncImages(self: *Renderer, im: *Images) void {
-        if (im.pixels.len == 0 or im.generation == self.images_generation) return;
+        // A sink uploads newly packed images directly. A retained CPU atlas
+        // from before binding must never overwrite those uploads with old rows.
+        if (im.sink != null or im.pixels.len == 0 or im.generation == self.images_generation) return;
         const side: objc.NSUInteger = @import("images.zig").size;
         if (self.images_texture == null) {
             const desc = objc.msg(objc.Object, objc.class("MTLTextureDescriptor"), "texture2DDescriptorWithPixelFormat:width:height:mipmapped:", .{ pixel_format, side, side, objc.NO });

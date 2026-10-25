@@ -100,6 +100,8 @@ pub const Surface = struct {
             .keys = .init(gpa),
         };
         self.ctx = .init(gpa, &self.text);
+        // Bind before UIKit can reenter a frame through the published view.
+        self.text.images.bindSink(.{ .ctx = &self.renderer, .upload = metal.Renderer.uploadImage });
         objc.setZig(uiview, self);
         objc.msg(void, uiview, "setMultipleTouchEnabled:", .{objc.YES});
         const layer = objc.msg(objc.Object, uiview, "layer", .{});
@@ -111,8 +113,6 @@ pub const Surface = struct {
         const loop = objc.msg(objc.Object, objc.class("NSRunLoop"), "mainRunLoop", .{});
         objc.msg(void, link, "addToRunLoop:forMode:", .{ loop, NSRunLoopCommonModes });
         self.display_link = link;
-        // Pictures go straight to the GPU: no copy of their atlas in memory.
-        self.text.images.sink = .{ .ctx = &self.renderer, .upload = metal.Renderer.uploadImage };
         return self;
     }
 
