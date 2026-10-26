@@ -78,7 +78,9 @@ fn italicOf(base: cf.CTFontRef, size: f32) cf.CTFontRef {
 fn named(name: []const u8, size: f32, weight: types.Weight, italic: bool) ?cf.CTFontRef {
     const family = cf.string(name);
     defer cf.CFRelease(family);
-    const w = weightValue(weight);
+    // CoreText maps an OpenType 300 face to -0.23, separately from
+    // NSFontWeightLight (-0.4) used by the system-font constructor.
+    const w: f64 = if (weight == .light) -0.23 else weightValue(weight);
     const wnum = CFNumberCreate(null, kCFNumberFloat64Type, &w) orelse return null;
     defer cf.CFRelease(wnum);
     const sym: i32 = if (italic) @intCast(italic_trait) else 0;
@@ -125,7 +127,15 @@ test "Light uses CoreText's lighter weight trait" {
     try std.testing.expect(CFNumberGetValue(light_number, kCFNumberFloat64Type, &light_weight));
     try std.testing.expect(CFNumberGetValue(regular_number, kCFNumberFloat64Type, &regular_weight));
     try std.testing.expect(light_weight < regular_weight);
+    const family_light = named("Helvetica Neue", 13, .light, false) orelse return error.SkipZigTest;
+    defer cf.CFRelease(family_light);
+    const postscript = CTFontCopyPostScriptName(family_light);
+    defer cf.CFRelease(postscript);
+    const expected = cf.string("HelveticaNeue-Light");
+    defer cf.CFRelease(expected);
+    try std.testing.expectEqual(@as(cf.CFIndex, 0), CFStringCompare(postscript, expected, 0));
 }
 extern "c" fn CTFontCopyTraits(cf.CTFontRef) ?cf.CFDictionaryRef;
 extern "c" fn CFDictionaryGetValue(cf.CFDictionaryRef, ?*const anyopaque) ?*const anyopaque;
 extern "c" fn CFNumberGetValue(*const anyopaque, cf.CFIndex, *anyopaque) bool;
+extern "c" fn CTFontCopyPostScriptName(cf.CTFontRef) cf.CFStringRef;
