@@ -42,6 +42,7 @@ fn fontKey(style: types.TextStyle) FontKey {
 
 fn weightOf(w: types.Weight) u16 {
     return switch (w) {
+        .light => 300,
         .regular => 400,
         .medium => 500,
         .semibold => 600,
@@ -422,4 +423,14 @@ test "a character cut off at a string's end is shaped, not decoded short" {
     // "a→" with the arrow's last byte gone, as a span can end.
     const w = ts.width("a\xe2\x86", .{ .size = 13 });
     try std.testing.expect(w > 0);
+}
+
+test "Light requests a real 300-weight face and keeps its own font cache entry" {
+    var text = TextSystem.init(std.testing.allocator);
+    defer text.deinit();
+    const light = text.font(.{ .weight = .light, .size = 13 });
+    const regular = text.font(.{ .weight = .regular, .size = 13 });
+    try std.testing.expectEqual(@as(u16, 300), light.weight);
+    try std.testing.expectEqual(@as(u16, 400), regular.weight);
+    try std.testing.expectEqual(@as(usize, 2), text.fonts.count());
 }

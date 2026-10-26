@@ -105,7 +105,7 @@ pub const Length = union(enum) {
 pub const Direction = enum { row, column };
 pub const Align = enum { start, center, end, stretch };
 pub const Justify = enum { start, center, end, space_between };
-pub const Weight = enum { regular, medium, semibold, bold };
+pub const Weight = enum { regular, medium, semibold, bold, light };
 
 pub const Shadow = struct {
     color: Color = .{ .a = 0.18 },

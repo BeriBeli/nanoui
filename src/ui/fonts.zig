@@ -50,6 +50,7 @@ const slant: Transform = .{ .a = 1, .b = 0, .c = 0.2, .d = 1, .tx = 0, .ty = 0 }
 /// CoreText's weights, as NSFontWeight (and UIFontWeight) values.
 pub fn weightValue(w: types.Weight) f64 {
     return switch (w) {
+        .light => -0.4,
         .regular => 0,
         .medium => 0.23,
         .semibold => 0.3,
@@ -107,3 +108,24 @@ fn named(name: []const u8, size: f32, weight: types.Weight, italic: bool) ?cf.CT
     }
     return f;
 }
+
+test "Light uses CoreText's lighter weight trait" {
+    const light = create(null, 13, .light, false, true);
+    defer cf.CFRelease(light);
+    const regular = create(null, 13, .regular, false, true);
+    defer cf.CFRelease(regular);
+    const light_traits = CTFontCopyTraits(light) orelse return error.MissingFontTraits;
+    defer cf.CFRelease(light_traits);
+    const regular_traits = CTFontCopyTraits(regular) orelse return error.MissingFontTraits;
+    defer cf.CFRelease(regular_traits);
+    var light_weight: f64 = 0;
+    var regular_weight: f64 = 0;
+    const light_number = CFDictionaryGetValue(light_traits, kCTFontWeightTrait) orelse return error.MissingFontWeight;
+    const regular_number = CFDictionaryGetValue(regular_traits, kCTFontWeightTrait) orelse return error.MissingFontWeight;
+    try std.testing.expect(CFNumberGetValue(light_number, kCFNumberFloat64Type, &light_weight));
+    try std.testing.expect(CFNumberGetValue(regular_number, kCFNumberFloat64Type, &regular_weight));
+    try std.testing.expect(light_weight < regular_weight);
+}
+extern "c" fn CTFontCopyTraits(cf.CTFontRef) ?cf.CFDictionaryRef;
+extern "c" fn CFDictionaryGetValue(cf.CFDictionaryRef, ?*const anyopaque) ?*const anyopaque;
+extern "c" fn CFNumberGetValue(*const anyopaque, cf.CFIndex, *anyopaque) bool;
