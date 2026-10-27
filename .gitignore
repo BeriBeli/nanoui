@@ -16,3 +16,4 @@ hillclimb/zig-pkg/
 __pycache__/
 *.pyc
 hillclimb/zig-pkg/
+.cache/

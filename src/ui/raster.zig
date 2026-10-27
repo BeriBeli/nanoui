@@ -9,11 +9,8 @@ const types = @import("types.zig");
 const gpu = @import("gpu.zig");
 const glass = @import("glass.zig");
 
-/// The glyph atlas, as the shader samples it: one byte per texel.
-pub const Mask = struct {
-    pixels: []const u8,
-    size: u32,
-};
+pub const Mask = @import("raster_text.zig").Mask;
+const glyph = @import("raster_text.zig").glyph;
 
 /// The image atlas: BGRA premultiplied, `size` × `size` (empty: none).
 pub const Pictures = struct {
@@ -33,7 +30,8 @@ pub fn draw(out: gpu.Pixels, instances: []const gpu.Instance, mask: Mask, pictur
 /// `out` is kept. Over the pixels of an earlier frame, with the `damage`
 /// between the two, it makes the same pixels as drawing it all.
 pub fn drawRegion(out: gpu.Pixels, instances: []const gpu.Instance, mask: Mask, pictures: Pictures, scale: f32, clear: types.Color, region: [4]usize) void {
-    const px: [4]u8 = .{ unit(clear.b), unit(clear.g), unit(clear.r), 255 };
+    const alpha = if (mask.native_pixels.len > 0) clear.a else 1;
+    const px: [4]u8 = .{ unit(clear.b * alpha), unit(clear.g * alpha), unit(clear.r * alpha), unit(alpha) };
     var job: Band = .{ .out = out, .instances = instances, .mask = mask, .pictures = pictures, .scale = scale, .clear = @bitCast(px), .region = region };
     // Glass reads what's drawn beyond its band: the bands meet before each
     // pane, which one thread draws.
@@ -140,7 +138,7 @@ fn cover(region: *?[4]usize, b: ?[4]usize) void {
     region.* = if (region.*) |r| .{ @min(r[0], add[0]), @min(r[1], add[1]), @max(r[2], add[2]), @max(r[3], add[3]) } else add;
 }
 
-fn unit(v: f32) u8 {
+pub fn unit(v: f32) u8 {
     return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
 }
 
@@ -310,13 +308,19 @@ fn quadScalar(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) 
             const aa = @max(sd[1] * inv, 0.0001) * 0.5;
             const coverage = 1 - smoothstep(-aa, aa, sd[0]);
             if (coverage <= 0) continue;
-            var col = c;
+            // Premultiplied: the border is laid over the fill (shader.metal).
+            var col: [4]f32 = .{ c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3] };
             if (has_border) {
                 const t = smoothstep(-bw - aa, -bw + aa, sd[0]);
-                for (0..4) |k| col[k] = c[k] + (bc[k] - c[k]) * t;
+                var edge: [4]f32 = .{ bc[0] * bc[3], bc[1] * bc[3], bc[2] * bc[3], bc[3] };
+                if (i.uv[0] > 0.5) {
+                    const dc = dashCover(pxl, py, hw, hh, r, bw, inv);
+                    for (&edge) |*e| e.* *= dc;
+                }
+                for (0..4) |k| col[k] += (edge[k] + col[k] * (1 - edge[3]) - col[k]) * t;
             }
-            const a = col[3] * coverage * cut;
-            blend(out.bytes, row + x * 4, col[0] * a, col[1] * a, col[2] * a, a);
+            const m = coverage * cut;
+            blend(out.bytes, row + x * 4, col[0] * m, col[1] * m, col[2] * m, col[3] * m);
         }
     }
 }
@@ -351,50 +355,6 @@ test "opaque interior fill matches scalar blending including fractional clipped 
 }
 
 /// The atlas sampled as Metal's linear filter with clamped edges does.
-fn sample(mask: Mask, u: f32, v: f32) f32 {
-    const s: f32 = @floatFromInt(mask.size);
-    const fx = u * s - 0.5;
-    const fy = v * s - 0.5;
-    const x0f = @floor(fx);
-    const y0f = @floor(fy);
-    const tx = fx - x0f;
-    const ty = fy - y0f;
-    const max: i64 = @as(i64, mask.size) - 1;
-    const x0: usize = @intCast(std.math.clamp(@as(i64, @intFromFloat(x0f)), 0, max));
-    const y0: usize = @intCast(std.math.clamp(@as(i64, @intFromFloat(y0f)), 0, max));
-    const x1: usize = @intCast(std.math.clamp(@as(i64, @intFromFloat(x0f)) + 1, 0, max));
-    const y1: usize = @intCast(std.math.clamp(@as(i64, @intFromFloat(y0f)) + 1, 0, max));
-    const n: usize = mask.size;
-    const a = @as(f32, @floatFromInt(mask.pixels[y0 * n + x0]));
-    const bb = @as(f32, @floatFromInt(mask.pixels[y0 * n + x1]));
-    const c = @as(f32, @floatFromInt(mask.pixels[y1 * n + x0]));
-    const d = @as(f32, @floatFromInt(mask.pixels[y1 * n + x1]));
-    const top = a + (bb - a) * tx;
-    const bottom = c + (d - c) * tx;
-    return (top + (bottom - top) * ty) / 255;
-}
-
-fn glyph(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, scale: f32, b: [4]usize) void {
-    if (mask.size == 0) return;
-    const inv = 1 / scale;
-    const c = i.color;
-    for (b[1]..b[3]) |y| {
-        const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
-        const ty = (wy - i.rect[1]) / i.rect[3];
-        const v = i.uv[1] + (i.uv[3] - i.uv[1]) * ty;
-        const row = y * out.width * 4;
-        for (b[0]..b[2]) |x| {
-            const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
-            const tx = (wx - i.rect[0]) / i.rect[2];
-            const u = i.uv[0] + (i.uv[2] - i.uv[0]) * tx;
-            var a = sample(mask, u, v) * c[3] * clipCover(i, wx, wy, inv);
-            // A truncated line fading out, as the shader fades it.
-            if (i.border_width > 0) a *= std.math.clamp((i.radius - wx) / i.border_width, 0, 1);
-            blend(out.bytes, row + x * 4, c[0] * a, c[1] * a, c[2] * a, a);
-        }
-    }
-}
-
 /// A BGRA texel of the image atlas, bilinear as Metal's sampler.
 /// Pixels to sample: the image atlas, or a texture's rows.
 const Source = struct {
@@ -593,4 +553,40 @@ test "a clip's rounded corners cut what it clips, only where asked" {
     const unpacked = gpu.clipCorners(gpu.clipRound(8, 1 | 8));
     try std.testing.expectEqual(@as(f32, 8), unpacked.radius);
     try std.testing.expectEqual(@as(u4, 9), unpacked.corners);
+}
+
+/// A dashed border's coverage at (`x`, `y`) from the box's centre, as
+/// GPUI lays dashes (shader.metal's `dash_cover`); `px` is a pixel's size.
+pub fn dashCover(x: f32, y: f32, hw: f32, hh: f32, r: f32, w: f32, px: f32) f32 {
+    const pi = std.math.pi;
+    const dv = 1 / (3 * w);
+    const sx = (2 * hw - 2 * r) * dv;
+    const sy = (2 * hh - 2 * r) * dv;
+    const cq = r * pi * 0.5 * dv;
+    const qx = @abs(x) - (hw - r);
+    const qy = @abs(y) - (hh - r);
+    const t: f32 = if (r > 0 and qx > 0 and qy > 0) blk: {
+        const vx = x - std.math.sign(x) * (hw - r);
+        const vy = y - std.math.sign(y) * (hh - r);
+        const ang = std.math.atan2(vy, vx);
+        break :blk if (x >= 0 and y < 0)
+            sx + (ang + pi * 0.5) * r * dv
+        else if (x >= 0)
+            sx + cq + sy + ang * r * dv
+        else if (y >= 0)
+            2 * sx + 2 * cq + sy + (ang - pi * 0.5) * r * dv
+        else
+            2 * sx + 3 * cq + 2 * sy + (ang + pi) * r * dv;
+    } else if ((hh - @abs(y)) < (hw - @abs(x)))
+        (if (y < 0) (x + hw - r) * dv else sx + 2 * cq + sy + (hw - r - x) * dv)
+    else
+        (if (x > 0) sx + cq + (y + hh - r) * dv else 2 * sx + 3 * cq + sy + (hh - r - y) * dv);
+    const max_t = 2 * (sx + sy) + 4 * cq;
+    if (max_t < 1) return 1;
+    const period = max_t / @floor(max_t);
+    const len: f32 = 2.0 / 3.0;
+    const u = t + period * 0.5 - len * 0.5;
+    const centered = u - period * @floor(u / period) - period * 0.5;
+    const sd = (@abs(centered) - len * 0.5) / dv;
+    return std.math.clamp(0.5 - sd / px, 0, 1);
 }

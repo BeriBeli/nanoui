@@ -10,3 +10,6 @@
 [submodule "apps/nanofly"]
 	path = apps/nanofly
 	url = https://github.com/justrach/nanofly.git
+[submodule "site"]
+	path = site
+	url = https://github.com/justrach/nanoui-site.git

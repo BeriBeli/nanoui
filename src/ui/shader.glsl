@@ -67,6 +67,39 @@ out vec4 frag;
 // The frame's pixels a point.
 uniform float scale;
 
+// A dashed border's coverage at `p` (from the box's centre), as GPUI lays
+// dashes (see shader.metal's `dash_cover`).
+float dash_cover(vec2 p, vec2 half_size, float r, float w) {
+    const float PI = 3.14159265;
+    float dv = 1.0 / (3.0 * w);
+    float sx = (2.0 * half_size.x - 2.0 * r) * dv;
+    float sy = (2.0 * half_size.y - 2.0 * r) * dv;
+    float cq = r * PI * 0.5 * dv;
+    vec2 q = abs(p) - (half_size - r);
+    float t;
+    if (r > 0.0 && q.x > 0.0 && q.y > 0.0) {
+        vec2 v = p - sign(p) * (half_size - r);
+        float ang = atan(v.y, v.x);
+        if (p.x >= 0.0 && p.y < 0.0) t = sx + (ang + PI * 0.5) * r * dv;
+        else if (p.x >= 0.0) t = sx + cq + sy + ang * r * dv;
+        else if (p.y >= 0.0) t = 2.0 * sx + 2.0 * cq + sy + (ang - PI * 0.5) * r * dv;
+        else t = 2.0 * sx + 3.0 * cq + 2.0 * sy + (ang + PI) * r * dv;
+    } else if ((half_size.y - abs(p.y)) < (half_size.x - abs(p.x))) {
+        t = p.y < 0.0 ? (p.x + half_size.x - r) * dv : sx + 2.0 * cq + sy + (half_size.x - r - p.x) * dv;
+    } else {
+        t = p.x > 0.0 ? sx + cq + (p.y + half_size.y - r) * dv : 2.0 * sx + 3.0 * cq + sy + (half_size.y - r - p.y) * dv;
+    }
+    float max_t = 2.0 * (sx + sy) + 4.0 * cq;
+    if (max_t < 1.0) return 1.0;
+    float period = max_t / floor(max_t);
+    float len = 2.0 / 3.0;
+    float u = t + period * 0.5 - len * 0.5;
+    float centered = u - period * floor(u / period) - period * 0.5;
+    float sd = (abs(centered) - len * 0.5) / dv;
+    float px = max(fwidth(p.x), 0.0001);
+    return clamp(0.5 - sd / px, 0.0, 1.0);
+}
+
 float rounded_box(vec2 p, vec2 half_size, float r) {
     vec2 q = abs(p) - half_size + r;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
@@ -227,14 +260,16 @@ vec4 shade() {
         float a = shadow_alpha(p, half_size, r, sigma) * i_color.a;
         return vec4(i_color.rgb * a, a);
     }
-    vec4 c = i_color;
+    // Premultiplied: the border is laid over the fill (see shader.metal).
+    vec4 c = vec4(i_color.rgb * i_color.a, i_color.a);
     float bw = i_misc.y;
     if (bw > 0.0 && i_border_color.a > 0.0) {
         float inner = smoothstep(-bw - aa, -bw + aa, d);
-        c = mix(c, i_border_color, inner);
+        vec4 b = vec4(i_border_color.rgb * i_border_color.a, i_border_color.a);
+        if (i_uv.x > 0.5) b *= dash_cover(p, half_size, r, bw);
+        c = mix(c, b + c * (1.0 - b.a), inner);
     }
-    float a = c.a * coverage;
-    return vec4(c.rgb * a, a);
+    return c * coverage;
 }
 
 void main() {

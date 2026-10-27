@@ -18,6 +18,14 @@ pub const TextBuffer = struct {
     len: usize = 0,
     /// Where the caret goes in the next frame, after the app set the text.
     want_caret: ?usize = null,
+    /// Asked to take the keyboard (`focus`): its field does, next frame.
+    want_focus: bool = false,
+
+    /// Gives its field the keyboard, as clicking into it would: ⌘L to the
+    /// composer, a new tab's prompt.
+    pub fn focus(b: *TextBuffer) void {
+        b.want_focus = true;
+    }
 
     pub fn text(b: *const TextBuffer) []const u8 {
         return b.buf[0..b.len];
@@ -278,7 +286,13 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         .clip = true,
     }, null);
     defer c.end();
-    const it = c.interact(i, .{ .focusable = true });
+    var it = c.interact(i, .{ .focusable = true });
+    if (buffer.want_focus) {
+        buffer.want_focus = false;
+        c.focus = it.id;
+        it.focused = true;
+        c.changed = true;
+    }
     if (it.hovered) {
         c.cursor_hand = false;
         c.cursor_text = true;
@@ -331,7 +345,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         if (it.rect) |r| {
             const local_x = c.input.mouse.x - r.x - pad_x + e.scroll_x;
             const local_y = c.input.mouse.y - r.y - pad_y + e.scroll_y;
-            if (multi and ((c.input.pressed and it.hovered) or (e.selecting and c.input.down))) {
+            if (multi and ((c.input.pressed and c.input.mouse_button == 1 and it.hovered) or (e.selecting and c.input.down))) {
                 const at = lines_mod.indexAtPoint(c, buffer.text(), style, lines_mod.layout(c, buffer.text(), style, wrap_w), c.input.mouse.x - r.x - pad_x, local_y, lh_);
                 e.caret = at;
                 if (c.input.pressed) {
@@ -344,7 +358,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
                     c.selection.blocked = true;
                     e.selecting = true;
                 }
-            } else if (c.input.pressed and it.hovered) {
+            } else if (c.input.pressed and c.input.mouse_button == 1 and it.hovered) {
                 const idx = c.text.indexAt(shownOf(buffer.text(), opts.password, bullets), style, local_x);
                 const at = if (opts.password) byteOfCodepoint(buffer.text(), idx / 3) else idx;
                 e.caret = at;

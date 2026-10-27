@@ -1,7 +1,13 @@
-//! The glyph atlas: each glyph rasterized once per font and quarter pixel
-//! of horizontal position, at the display's scale, into one R8 texture the
-//! renderer samples. Shelf packed; it grows when full, then resets.
+//! The glyph atlas: each glyph rasterized once per font, quarter pixel of
+//! horizontal position and stroke weight, at the display's scale, into one
+//! R8 texture the renderer samples. Shelf packed; it grows when full, then
+//! resets.
+//!
+//! Strokes are thickened as macOS thickens them with font smoothing on:
+//! more for lighter text, so light text on a dark ground doesn't read thin
+//! (`dilationFor`; the levels AppKit and GPUI use).
 const std = @import("std");
+const builtin = @import("builtin");
 const objc = @import("../objc.zig");
 const cf = @import("cf.zig");
 const types = @import("types.zig");
@@ -31,7 +37,35 @@ pub const Sprite = struct {
     h: f32,
 };
 
-const Key = struct { font: u16, glyph: u16, bin: u8 };
+const Key = struct { font: u16, glyph: u16, bin: u8, dilation: u8 };
+
+/// How much CoreGraphics thickens text of this colour, 0 to 4: the level it
+/// picks from the fill's luminance with font smoothing on, none when the
+/// user turned smoothing off (`AppleFontSmoothing` 0).
+pub fn dilationFor(r: f32, g: f32, b: f32) u8 {
+    if (!smoothingAllowed()) return 0;
+    const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return @intFromFloat(std.math.clamp(@floor(4 * luminance + 0.5), 0, 4));
+}
+
+/// Tests and other platforms set this; null asks macOS once.
+pub var smoothing_allowed: ?bool = null;
+
+fn smoothingAllowed() bool {
+    if (smoothing_allowed) |v| return v;
+    if (builtin.os.tag != .macos) return true;
+    var allowed = true;
+    const key = cf.string("AppleFontSmoothing");
+    defer cf.CFRelease(@ptrCast(key));
+    if (cf.CFPreferencesCopyAppValue(key, cf.kCFPreferencesCurrentApplication)) |v| {
+        defer cf.CFRelease(v);
+        // Only an explicit 0 turns smoothing off.
+        var n: i64 = 1;
+        if (cf.CFGetTypeID(v) == cf.CFNumberGetTypeID() and cf.CFNumberGetValue(v, cf.number_sint64, &n)) allowed = n != 0;
+    }
+    smoothing_allowed = allowed;
+    return allowed;
+}
 const SymbolKey = struct { name: u64, size_bits: u32, weight: u8 };
 
 pub const Atlas = struct {
@@ -97,17 +131,17 @@ pub const Atlas = struct {
     }
 
     /// The sprite of `glyph` of `font` (whose id is `font_id`) drawn at
-    /// `bin` quarters of a pixel right of a pixel boundary; null for blank
-    /// glyphs (spaces).
-    pub fn glyph(a: *Atlas, font_id: u16, font: cf.CTFontRef, g: u16, bin: u8) ?Sprite {
-        const key: Key = .{ .font = font_id, .glyph = g, .bin = bin };
+    /// `bin` quarters of a pixel right of a pixel boundary, its strokes
+    /// thickened `dilation` levels; null for blank glyphs (spaces).
+    pub fn glyph(a: *Atlas, font_id: u16, font: cf.CTFontRef, g: u16, bin: u8, dilation: u8) ?Sprite {
+        const key: Key = .{ .font = font_id, .glyph = g, .bin = bin, .dilation = dilation };
         if (a.sprites.get(key)) |sp| return sp;
-        const sp = a.rasterize(font, g, bin);
+        const sp = a.rasterize(font, g, bin, dilation);
         if (!a.needs_texture) a.sprites.put(a.gpa, key, sp) catch {};
         return sp;
     }
 
-    fn rasterize(a: *Atlas, font: cf.CTFontRef, g: u16, bin: u8) ?Sprite {
+    fn rasterize(a: *Atlas, font: cf.CTFontRef, g: u16, bin: u8, dilation: u8) ?Sprite {
         const scale = a.scale;
         var glyphs = [1]u16{g};
         const bounds = CTFontGetBoundingRectsForGlyphs(font, 0, &glyphs, null, 1);
@@ -138,13 +172,15 @@ pub const Atlas = struct {
             defer a.gpa.free(mask);
             @memcpy(a.pixels.items, mask);
         } else {
-            const ctx = cf.CGBitmapContextCreate(a.pixels.items.ptr, w, h, 8, w, null, cf.image_alpha_only) orelse return null;
+            const gray = cf.CGColorSpaceCreateDeviceGray() orelse return null;
+            defer cf.CGColorSpaceRelease(gray);
+            const ctx = cf.CGBitmapContextCreate(a.pixels.items.ptr, w, h, 8, w, gray, cf.image_alpha_only) orelse return null;
             defer cf.CGContextRelease(ctx);
             cf.CGContextSetShouldAntialias(ctx, true);
-            cf.CGContextSetShouldSmoothFonts(ctx, false);
+            cf.CGContextSetShouldSmoothFonts(ctx, dilation > 0);
             cf.CGContextSetAllowsFontSubpixelPositioning(ctx, true);
             cf.CGContextSetShouldSubpixelPositionFonts(ctx, true);
-            cf.CGContextSetGrayFillColor(ctx, 1, 1);
+            cf.CGContextSetGrayFillColor(ctx, @as(f64, @floatFromInt(dilation)) * 0.25, 1);
             // The glyph's origin, in pixels from the bitmap's bottom left.
             CGContextTranslateCTM(ctx, @as(f64, pad) - x0 + sub, @as(f64, pad) - y0);
             cf.CGContextScaleCTM(ctx, s, s);

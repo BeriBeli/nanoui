@@ -226,6 +226,7 @@ pub const TextSystem = struct {
         var h = std.hash.Wyhash.init(extra);
         h.update(s);
         h.update(std.mem.asBytes(&style.size));
+        h.update(std.mem.asBytes(&style.mono_scale));
         const features = @import("font_features.zig").hash(style.features);
         h.update(std.mem.asBytes(&features));
         h.update(&.{ @backingInt(style.weight), @intFromBool(style.mono), @intFromBool(style.italic) });
@@ -385,14 +386,17 @@ pub const TextSystem = struct {
         return .{ .width = w, .glyphs = glyphs };
     }
 
-    /// The atlas sprite of a shaped glyph at `bin` quarters of a pixel.
-    pub fn glyph(self: *TextSystem, g: Glyph, bin: u8) ?Sprite {
+    /// The atlas sprite of a shaped glyph at `bin` quarters of a pixel,
+    /// its strokes thickened `dilation` levels (`atlas.dilationFor`).
+    pub fn glyph(self: *TextSystem, g: Glyph, bin: u8, dilation: u8) ?Sprite {
         if (g.font >= self.run_fonts.items.len) return null;
         if (g.glyph == 0) self.last_shape_error = "MissingGlyph";
-        const sprite = self.atlas.glyph(g.font, self.run_fonts.items[g.font], g.glyph, bin);
+        const sprite = self.atlas.glyph(g.font, self.run_fonts.items[g.font], g.glyph, bin, dilation);
         if (self.atlas.last_raster_error) |reason| self.last_shape_error = reason;
         return sprite;
     }
+
+    pub const dilationFor = @import("atlas.zig").dilationFor;
 
     /// The width of `s` on one line.
     pub fn width(self: *TextSystem, s: []const u8, style: types.TextStyle) f32 {

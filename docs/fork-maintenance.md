@@ -1,6 +1,6 @@
 # Linux/X11 fork maintenance
 
-The stable baseline is upstream v0.7.0. This fork owns its old-Linux and
+The stable baseline is upstream v0.7.1. This fork owns its old-Linux and
 X11/VDI compatibility code, regression tests and standalone benchmark.
 Letty consumes a full commit and checksum-verified source archive directly;
 it does not replay nanoui patches or supply framework font I/O symbols.
@@ -23,6 +23,12 @@ The [benchmark](../tools/x11-bench/README.md) measures the actual bounded
 CPU backing used by the supported GTK 3 path. Snapshot and workload tests run
 offscreen. Its Linux package includes source hashes and an ELF ABI audit.
 Old benchmark reports continue to certify only their recorded implementations.
+
+The v0.7.1 merge retains the fork's image-sink binding, color-font masks,
+font-feature cache keys, raw pointer buttons and terminal wheel metadata.
+Native secondary clicks also reach upstream context menus without activating
+primary widgets. macOS built-in scroll views use upstream display pacing;
+product wheel consumers keep their discrete steps, horizontal delta and phase.
 
 ## Maintenance checks
 

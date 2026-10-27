@@ -323,6 +323,7 @@ fn onPress(w: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int 
     s.setMouse(e);
     s.ctx.updateHot();
     if (button != 1) {
+        if (button == 3) s.ctx.secondaryDown();
         s.ctx.input.pressed = true;
         s.ctx.input.down = true;
         s.frame();

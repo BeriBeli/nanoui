@@ -28,9 +28,10 @@ pub fn run(c: *Context, view: View, ts: *text.TextSystem, instances: *std.ArrayL
     c.frame_in = null;
     ts.setFamilies(theme.font, theme.mono_font);
     ts.beginFrame();
+    @import("scrollbar.zig").update(c);
 
     const t0 = now();
-    if (c.input.pressed) c.selection.pressed = true;
+    if (c.input.pressed and c.input.mouse_button == 1) c.selection.pressed = true;
     c.copy_done = false;
     c.copy_requested = false;
     for (c.input.ops) |op| if (op == .command and op.command == .copy) {

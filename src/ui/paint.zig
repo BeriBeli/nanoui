@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const metal = @import("gpu.zig");
 const glass = @import("glass.zig");
 const text_mod = @import("text.zig");
+const native_windows = @import("dwrite.zig").enabled;
 const rich = text_mod.rich;
 const ctx_mod = @import("context.zig");
 const Context = ctx_mod.Context;
@@ -85,15 +86,8 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip:
     const rect4: [4]f32 = .{ r.x, r.y, r.w, r.h };
 
     if (visible.w > 0 and visible.h > 0) {
-        if (st.shadow) |sh| push(c, out, .{
-            .rect = .{ r.x, r.y + sh.y, r.w, r.h },
-            .color = metal.color4(sh.color.alpha(opacity)),
-            .radius = st.radius,
-            // CSS's blur radius is twice the Gaussian's standard deviation.
-            .border_width = sh.blur / 2,
-            .kind = metal.Kind.shadow,
-            .clip = clip4,
-        });
+        if (st.shadow) |sh| paintShadow(c, out, sh, r, st.radius, opacity, clip4);
+        for (st.shadows) |sh| paintShadow(c, out, sh, r, st.radius, opacity, clip4);
         // Glass takes the background's place.
         const fill: ?types.Color = if (st.glass != null) null else st.background;
         if (st.glass) |g| push(c, out, glass.instance(glass.material(g, r.w, r.h, c.theme.dark, c.scale), rect4, st.radius, clip4, opacity));
@@ -103,6 +97,8 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip:
             .border_color = metal.color4((st.border orelse types.Color.transparent).alpha(opacity)),
             .border_width = if (st.border != null) st.border_width else 0,
             .radius = st.radius,
+            // A quad's uv is free: its x marks a dashed border.
+            .uv = .{ if (st.border_dashed) 1 else 0, 0, 0, 0 },
             .clip = clip4,
         });
         switch (n.content) {
@@ -199,7 +195,7 @@ fn paintGlyphRun(c: *Context, out: *std.ArrayList(metal.Instance), r: types.Rect
         if (pen / c.scale > clip4[2]) continue;
         const px = @floor(pen);
         const bin: u8 = @intFromFloat(@min(text_mod.subpixel_bins - 1, @floor((pen - px) * text_mod.subpixel_bins)));
-        const sp = c.text.glyph(glyph, bin) orelse continue;
+        const sp = c.text.glyph(glyph, bin, @TypeOf(c.text.*).dilationFor(run.color.r, run.color.g, run.color.b)) orelse continue;
         push(c, out, .{
             .rect = .{ px / c.scale + sp.x, baseline - glyph.y + sp.y, sp.w, sp.h },
             .color = color,
@@ -225,6 +221,19 @@ fn paintText(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, n: ct
     } else {
         textRun(c, out, t, 0, t.str.len, inner.x, inner.y, f, lh, clip4, opacity, sel);
     }
+}
+
+fn paintShadow(c: *Context, out: *std.ArrayList(metal.Instance), sh: types.Shadow, r: types.Rect, radius: f32, opacity: f32, clip4: [4]f32) void {
+    const s = sh.spread;
+    push(c, out, .{
+        .rect = .{ r.x - s, r.y + sh.y - s, @max(0, r.w + 2 * s), @max(0, r.h + 2 * s) },
+        .color = metal.color4(sh.color.alpha(opacity)),
+        .radius = @max(0, radius + s),
+        // CSS's blur radius is twice the Gaussian's standard deviation.
+        .border_width = sh.blur / 2,
+        .kind = metal.Kind.shadow,
+        .clip = clip4,
+    });
 }
 
 /// Where a truncated line ends, and over how many points it fades out
@@ -295,10 +304,13 @@ fn textRunLimit(c: *Context, out: *std.ArrayList(metal.Instance), t: ctx_mod.Con
         const pen = (x + g.x) * scale;
         if (pen / scale > clip4[2]) break;
         if (limit) |l| if (pen / scale >= l.end) break;
-        const px = @floor(pen);
-        const bin: u8 = @intFromFloat(@min(text_mod.subpixel_bins - 1, @floor((pen - px) * text_mod.subpixel_bins)));
-        const sp = c.text.glyph(g, bin) orelse continue;
+        const positions: f32 = if (native_windows) @floatFromInt(c.text.positions(g)) else text_mod.subpixel_bins;
+        const quantized = if (native_windows) @round(pen * positions) / positions else pen;
+        const px = @floor(quantized);
+        const phase = (quantized - px) * text_mod.subpixel_bins;
+        const bin: u8 = @intFromFloat(@min(text_mod.subpixel_bins - 1, if (native_windows) @round(phase) else @floor(phase)));
         var color = base;
+        var tone = t.color;
         if (t.spans.len > 0) {
             const at = start + g.index;
             while (span_i < t.spans.len and t.spans[span_i].end <= at) span_i += 1;
@@ -309,8 +321,11 @@ fn textRunLimit(c: *Context, out: *std.ArrayList(metal.Instance), t: ctx_mod.Con
             }
             if (span_i < t.spans.len and t.spans[span_i].start <= at) if (t.spans[span_i].color) |sc| {
                 color = metal.color4(sc.alpha(opacity));
+                tone = sc;
             };
         }
+        // Lighter text is drawn with thicker strokes, as macOS draws it.
+        const sp = c.text.glyph(g, bin, @TypeOf(c.text.*).dilationFor(tone.r, tone.g, tone.b)) orelse continue;
         push(c, out, .{
             .rect = .{ px / scale + sp.x, baseline - g.y + sp.y, sp.w, sp.h },
             .color = color,
@@ -398,6 +413,38 @@ fn roundClip(items: []metal.Instance, box: types.Rect, visible: types.Rect, radi
     }
 }
 
+/// How long an overlay bar stays after the box last scrolled, then how
+/// long it takes to fade (GPUI's `MENU_SCROLLBAR_LINGER_MS`, `_FADE_MS`).
+const overlay_linger: f64 = 1.4;
+const overlay_fade: f64 = 0.26;
+
+fn paintOverlayBar(c: *Context, out: *std.ArrayList(metal.Instance), n: ctx_mod.Node, visible: types.Rect, opacity: f32, offset: f32, view_h: f32, content_h: f32, t: f32) void {
+    const color = n.style.scrollbar.overlay;
+    const gop = c.overlay_bars.getOrPut(c.gpa, n.id) catch return;
+    // First seen: nothing has scrolled yet.
+    if (!gop.found_existing) gop.value_ptr.* = .{ .offset = offset, .moved_at = -1e9 };
+    if (gop.value_ptr.offset != offset) gop.value_ptr.* = .{ .offset = offset, .moved_at = c.time };
+    const strip: types.Rect = .{ .x = n.rect.x + n.rect.w - 10, .y = n.rect.y, .w = 10, .h = n.rect.h };
+    const held = strip.contains(c.input.mouse);
+    const since = c.time - gop.value_ptr.moved_at;
+    const fade: f32 = if (held) 1 else @floatCast(std.math.clamp(1 - (since - overlay_linger) / overlay_fade, 0, 1));
+    if (!held and since < overlay_linger + overlay_fade) {
+        // Wake for the fade's start, then step through it.
+        c.frameIn(@floatCast(if (since < overlay_linger) overlay_linger - since else 1.0 / 60.0));
+    }
+    if (fade <= 0) return;
+    const inset: f32 = 4;
+    const track = view_h - 2 * inset;
+    const bar_h = @max(24, track * view_h / content_h);
+    const w: f32 = if (held) 5 else 3;
+    push(c, out, .{
+        .rect = .{ n.rect.x + n.rect.w - 2 - w, n.rect.y + inset + (track - bar_h) * std.math.clamp(t, 0, 1), w, bar_h },
+        .color = metal.color4(color.alpha(color.a * @as(f32, if (held) 0.68 / 0.5 else 1) * fade * opacity)),
+        .radius = w / 2,
+        .clip = metal.clip4(visible),
+    });
+}
+
 fn paintScrollbar(c: *Context, out: *std.ArrayList(metal.Instance), n: ctx_mod.Node, visible: types.Rect, opacity: f32) void {
     const offset = c.scroll.get(n.id) orelse 0;
     // The content's height: from the first child's top to the last child's bottom.
@@ -407,8 +454,9 @@ fn paintScrollbar(c: *Context, out: *std.ArrayList(metal.Instance), n: ctx_mod.N
     const content_h = last.y + last.h - first.y + n.style.padding.vertical();
     const view_h = n.rect.h;
     if (content_h <= view_h + 0.5) return;
-    const bar_h = @max(24, view_h * view_h / content_h);
     const t = offset / (content_h - view_h);
+    if (n.style.scrollbar == .overlay) return paintOverlayBar(c, out, n, visible, opacity, offset, view_h, content_h, t);
+    const bar_h = @max(24, view_h * view_h / content_h);
     const y = n.rect.y + (view_h - bar_h) * std.math.clamp(t, 0, 1);
     push(c, out, .{
         .rect = .{ n.rect.x + n.rect.w - 7, y + 2, 4, bar_h - 4 },

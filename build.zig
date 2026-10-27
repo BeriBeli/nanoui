@@ -12,7 +12,7 @@ const ios_frameworks = [_][]const u8{ "UIKit", "Metal", "QuartzCore", "CoreText"
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const portable = b.option(bool, "portable", "Use nanoui's own text and CPU renderer on macOS too (to test that path)") orelse false;
+    const portable = b.option(bool, "portable", "Use portable text and CPU rendering instead of native rasterization (for tests)") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "portable", portable);
     // The one place the version is kept: build.zig.zon (tools/version.sh).

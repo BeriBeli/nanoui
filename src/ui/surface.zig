@@ -15,7 +15,7 @@ const ctx_mod = @import("context.zig");
 const Context = ctx_mod.Context;
 const ui = @import("ui.zig");
 const Window = @import("../window.zig").Window;
-
+const pacing = @import("pacing.zig");
 pub const Surface = struct {
     gpa: std.mem.Allocator,
     window: *Window,
@@ -38,8 +38,8 @@ pub const Surface = struct {
     tick_scheduled: bool = false,
     /// Paces animation frames at the display's refresh (CADisplayLink).
     display_link: ?objc.Object = null,
-    /// The pace asked of the link: 0 is the display's.
-    link_fps: f32 = 0,
+    /// The pace asked of the link: 0 is the display's; -1 none asked yet.
+    link_fps: f32 = -1,
     /// A frame was wanted while the window was hidden: run it once visible.
     pending: bool = false,
     dead: bool = false,
@@ -49,6 +49,9 @@ pub const Surface = struct {
     resizing: bool = false,
     cursor: ctx_mod.Cursor = .arrow,
     theme_override: ?Theme = null,
+    /// Scrolling gathered for the link's next frame, and the frames' log.
+    scroll: pacing.Scroll = .{},
+    frame_log: pacing.FrameLog = .{},
 
     pub fn create(window: *Window, view: ui.View, theme_override: ?Theme) !*Surface {
         const gpa = window.app.gpa;
@@ -81,6 +84,7 @@ pub const Surface = struct {
             .start_time = cf.CACurrentMediaTime(),
         };
         self.ctx = .init(gpa, &self.text);
+        self.frame_log = .open();
         // AppKit may draw reentrantly as soon as the view points back to us.
         // Keep image ownership GPU-only from the very first such frame.
         self.text.images.bindSink(.{ .ctx = &self.renderer, .upload = metal.Renderer.uploadImage });
@@ -117,6 +121,7 @@ pub const Surface = struct {
             objc.release(link);
         }
         if (self.tracking) |t| objc.release(t);
+        self.frame_log.close();
         objc.release(self.nsview);
         self.instances.deinit(self.gpa);
         self.pasted.deinit(self.gpa);
@@ -179,7 +184,11 @@ pub const Surface = struct {
         const now = cf.CACurrentMediaTime();
         const dt: f32 = if (self.last_frame_time > 0) @floatCast(@min(now - self.last_frame_time, 0.1)) else 1.0 / 60.0;
         self.last_frame_time = now;
-        c.reduced_motion = reduceMotion();
+        self.frame_log.note(now);
+        c.reduced_motion = @import("surface_tracking.zig").reduceMotion();
+        // What scrolling gathered since the last frame, applied at once.
+        const dy = self.scroll.take();
+        if (dy != 0 and !c.applyScroll(dy) and c.wants_wheel) c.input.scroll = .{ .y = dy };
         const r = frame_mod.run(c, self.view, &self.text, &self.instances, self.size, self.scale, self.theme(), dt, now - self.start_time);
         @import("../play.zig").paint(self.gpa, &self.instances);
         self.renderer.syncImages(&self.text.images);
@@ -191,8 +200,10 @@ pub const Surface = struct {
         };
         self.renderer.draw(self.instances.items, atlas, self.size, c.theme.background);
         self.updateCursor();
-        // Something moved under a still pointer, or a value is animating.
-        const more = c.animating or r.hot_changed;
+        if (dy != 0) c.updateHot();
+        // Something moved under a still pointer, a value is animating, or
+        // a scroll goes on: the link keeps the display's pace.
+        const more = c.animating or r.hot_changed or self.scroll.active(now);
         if (self.resizing) {
             // The resize's next step draws again; its end catches up.
             self.setPaced(false);
@@ -221,9 +232,10 @@ pub const Surface = struct {
         const fps: f32 = if (seconds) |s| std.math.clamp(1 / @max(s, 0.001), 1, 60) else 0;
         if (fps == self.link_fps) return;
         self.link_fps = fps;
-        const Range = extern struct { minimum: f32, maximum: f32, preferred: f32 };
-        const range: Range = if (fps == 0) .{ .minimum = 0, .maximum = 0, .preferred = 0 } else .{ .minimum = fps, .maximum = fps, .preferred = fps };
-        objc.msg(void, link, "setPreferredFrameRateRange:", .{range});
+        // The display's own pace is the screen's fastest: 120 on ProMotion.
+        const screen = objc.msg(?objc.Object, self.window.nswindow, "screen", .{});
+        const max: f32 = if (screen) |sc| @floatFromInt(objc.msg(isize, sc, "maximumFramesPerSecond", .{})) else 0;
+        objc.msg(void, link, "setPreferredFrameRateRange:", .{pacing.range(fps, max)});
     }
 
     fn visible(self: *Surface) bool {
@@ -329,6 +341,12 @@ fn mouseDown(obj: objc.Object, selector: objc.SEL, event: objc.Object) callconv(
     _ = objc.msg(objc.BOOL, s.window.nswindow, "makeFirstResponder:", .{obj});
     s.setMouse(event);
     s.ctx.updateHot();
+    // A Control-click is the Mac's secondary click.
+    if (s.ctx.input.mouse_button == 1 and s.ctx.input.ctrl) {
+        s.ctx.secondaryDown();
+        return s.frame();
+    }
+    if (s.ctx.input.mouse_button == 2) s.ctx.secondaryDown();
     s.ctx.input.click_count = @intCast(objc.msg(objc.NSInteger, event, "clickCount", .{}));
     // Under a hidden title bar, the top strip moves the window as a title bar would.
     if (s.ctx.input.mouse_button == 1 and s.window.title_bar == .hidden and s.ctx.input.mouse.y < s.ctx.title_bar_height and s.ctx.hot == 0) {
@@ -386,6 +404,12 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     const factor: f32 = if (precise) 1 else 12;
     const dy = lines * factor;
     const dx = @import("input.zig").macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaX", .{})), precise) * factor;
+    // Product wheel consumers retain detents, horizontal motion and phase.
+    // Built-in scroll views gather their deltas on the display link.
+    if (dy != 0 and s.display_link != null and !s.resizing and !s.ctx.wants_wheel) {
+        s.scroll.add(dy, cf.CACurrentMediaTime());
+        return s.requestFrame();
+    }
     if (dy != 0 and s.ctx.applyScroll(dy)) {
         s.frame();
         s.ctx.updateHot();
@@ -568,23 +592,6 @@ fn backingChanged(obj: objc.Object, _: objc.SEL) callconv(.c) void {
 }
 
 fn updateTrackingAreas(obj: objc.Object, _: objc.SEL) callconv(.c) void {
-    objc.msgSuper(void, obj, objc.class("NSView"), "updateTrackingAreas", .{});
     const s = surfaceOf(obj) orelse return;
-    if (s.tracking) |t| {
-        objc.msg(void, obj, "removeTrackingArea:", .{t});
-        objc.release(t);
-    }
-    // Entered and exited, moved, always active, in the visible rect.
-    const opts: objc.NSUInteger = 0x01 | 0x02 | 0x80 | 0x200;
-    const area = objc.msg(objc.Object, objc.alloc("NSTrackingArea"), "initWithRect:options:owner:userInfo:", .{
-        objc.CGRect{}, opts, obj, @as(?objc.Object, null),
-    });
-    objc.msg(void, obj, "addTrackingArea:", .{area});
-    s.tracking = area;
-}
-
-/// System Settings, Accessibility, Display, Reduce motion.
-fn reduceMotion() bool {
-    const ws = objc.msg(objc.Object, objc.class("NSWorkspace"), "sharedWorkspace", .{});
-    return objc.msg(objc.BOOL, ws, "accessibilityDisplayShouldReduceMotion", .{});
+    @import("surface_tracking.zig").update(obj, &s.tracking);
 }
