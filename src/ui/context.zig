@@ -536,6 +536,8 @@ pub const Context = struct {
     pub fn pointerDown(c: *Context) void {
         c.input.down = true;
         c.input.pressed = true;
+        // Keep raw terminal edges without starting a primary UI gesture.
+        if (c.input.mouse_button != 1) return;
         if (@import("scrollbar.zig").begin(c)) {
             c.input.pressed = false;
             c.active = 0;

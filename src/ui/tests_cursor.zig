@@ -192,17 +192,20 @@ test "raw secondary button edges preserve field focus and never activate a widge
     t.settle(1);
     const focus = t.ctx.focus;
     const open = t.findText("Open").?;
-    t.moveTo(open.x + open.w / 2, open.y + open.h / 2);
-    t.ctx.input.mouse_button = 2;
-    t.ctx.input.pressed = true;
-    t.ctx.input.down = true;
-    t.ctx.secondaryDown();
-    t.frame();
-    try testing.expectEqual(focus, t.ctx.focus);
-    t.ctx.input.down = false;
-    t.ctx.input.released = true;
-    t.frame();
+    for ([_]u8{ 2, 3 }) |button| {
+        for ([_]ui.Point{ .{ .x = open.x + open.w / 2, .y = open.y + open.h / 2 }, .{ .x = 400, .y = 190 } }) |point| {
+            t.moveTo(point.x, point.y);
+            t.ctx.input.mouse_button = button;
+            if (button == 2) t.ctx.secondaryDown();
+            t.ctx.pointerDown();
+            try testing.expect(t.ctx.input.pressed and t.ctx.input.down);
+            t.frame();
+            try testing.expectEqual(focus, t.ctx.focus);
+            t.ctx.pointerUp();
+            t.frame();
+            try testing.expectEqual(@as(u32, 0), m.button_clicks);
+            try testing.expectEqual(focus, t.ctx.focus);
+        }
+    }
     try testing.expectEqual(@as(u32, 1), m.asked);
-    try testing.expectEqual(@as(u32, 0), m.button_clicks);
-    try testing.expectEqual(focus, t.ctx.focus);
 }
