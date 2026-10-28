@@ -223,3 +223,41 @@ test "button flush against the right edge of a scroll box gets its click" {
     t.click(95, 8);
     try testing.expectEqual(@as(u32, 1), s.edge_clicks);
 }
+
+// Use the same physical-button adapter as AppKit, independently of UI.down.
+test "raw right and middle releases survive context menu gesture completion" {
+    const Scene = struct {
+        field: ui.TextBuffer = .{},
+        edges: [3][2]u32 = @splat(.{ 0, 0 }),
+        clicks: u32 = 0,
+        fn build(self: *@This(), c: *ui.Context) void {
+            const index = c.input.mouse_button - 1;
+            if (c.input.pressed) self.edges[index][0] += 1;
+            if (c.input.released) self.edges[index][1] += 1;
+            ui.column(c, .{});
+            defer ui.end(c);
+            _ = ui.textField(c, &self.field, .{});
+            if (ui.button(c, "Primary", .{}).clicked) self.clicks += 1;
+        }
+    };
+    var s: Scene = .{};
+    defer s.field.deinit();
+    s.field.set("edit");
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&s, Scene.build), .{});
+    defer t.deinit();
+    try t.clickText("edit");
+    const focus = t.ctx.focus;
+    try testing.expect(focus != 0);
+    s.edges = @splat(.{ 0, 0 });
+    const button = t.findText("Primary").?;
+    t.rightClick(button.x + 2, button.y + 2);
+    try testing.expectEqual([2]u32{ 1, 1 }, s.edges[1]);
+    try testing.expectEqual(focus, t.ctx.focus);
+    t.middleClick(button.x + 2, button.y + 2);
+    try testing.expectEqual([2]u32{ 1, 1 }, s.edges[2]);
+    try testing.expectEqual(focus, t.ctx.focus);
+    try testing.expectEqual(@as(u32, 0), s.clicks);
+    try testing.expect(!t.pointer_buttons.release(.right));
+    try testing.expect(!t.pointer_buttons.release(.middle));
+}

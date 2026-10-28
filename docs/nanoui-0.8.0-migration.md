@@ -44,6 +44,21 @@ because upstream changed the same files.
 - Keep upstream's image decode budgets, cache compaction, shadow kernels,
   text editing, focus traversal and Objective-C ABI fixes directly.
 
+The AppKit adapter keeps physical button presses separately from `Input.down`.
+Upstream ends a UI context-menu gesture by clearing `Input.down`; using that
+flag as the release gate would drop a terminal's raw right-button release.
+The shared physical-button adapter delivers each owned release once and rejects
+duplicates. The Tester uses the same adapter; a field-focus/widget regression
+verifies complete raw right/middle edges without primary widget activation.
+
+Hidden v0.8.0 surfaces defer presentation and portable glyph uploads. The
+`Surface.glyphAtlasTexture` inspection hook resolves that upload through the
+same path as the presenter, so owned offscreen pixel fixtures do not assume
+that a hidden frame has already allocated a GPU atlas.
+
+The standalone X11 benchmark also releases its new growable `TextBuffer`
+when the owning process fixture or test state ends.
+
 ## Verification scope
 
 The migration adds regressions for transform-only damage, rotated glyph/image/
@@ -60,7 +75,7 @@ on Linux 3.10/glibc 2.17, real X11/VDI latency or system IME acceptance.
 
 Verified on macOS arm64 with Zig 0.17.0:
 
-- Native framework: 283 passed, 1 skipped; portable: 266 passed, 7 skipped.
+- Native framework: 284 passed, 1 skipped; portable: 267 passed, 7 skipped.
 - Native examples and the line-limit check passed.
 - Linux x86_64 kernel 3.10/glibc 2.17 baseline CPU and aarch64 builds passed;
   the x86_64 test binary also cross-compiled. All shipped x86_64 ELF files

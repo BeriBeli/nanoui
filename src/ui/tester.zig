@@ -50,6 +50,7 @@ pub const Tester = struct {
     dt: f32 = 1.0 / 60.0,
     /// What copy and cut wrote: tests never touch the system's clipboard.
     clipboard: std.ArrayList(u8) = .empty,
+    pointer_buttons: @import("input.zig").Buttons = .{},
     /// The simulated clock, advanced by `dt` each frame.
     time: f64 = 0,
 
@@ -122,20 +123,26 @@ pub const Tester = struct {
         t.click(x, y);
         t.moveTo(x, y);
         t.ctx.input.click_count = 2;
+        t.pointer_buttons.press(@fromBackingInt(@intCast(t.ctx.input.mouse_button)));
         t.ctx.pointerDown();
         t.frame();
-        t.ctx.pointerUp();
-        t.frame();
+        if (t.pointer_buttons.release(@fromBackingInt(@intCast(t.ctx.input.mouse_button)))) {
+            t.ctx.pointerUp();
+            t.frame();
+        }
         t.ctx.input.click_count = 1;
     }
 
     pub fn click(t: *Tester, x: f32, y: f32) void {
         t.moveTo(x, y);
         t.ctx.input.click_count = 1;
+        t.pointer_buttons.press(@fromBackingInt(@intCast(t.ctx.input.mouse_button)));
         t.ctx.pointerDown();
         t.frame();
-        t.ctx.pointerUp();
-        t.frame();
+        if (t.pointer_buttons.release(@fromBackingInt(@intCast(t.ctx.input.mouse_button)))) {
+            t.ctx.pointerUp();
+            t.frame();
+        }
     }
 
     /// A right-click at (x, y): a box's context menu.
@@ -147,6 +154,7 @@ pub const Tester = struct {
 
     pub fn drag(t: *Tester, x1: f32, y1: f32, x2: f32, y2: f32) void {
         t.moveTo(x1, y1);
+        t.pointer_buttons.press(@fromBackingInt(@intCast(t.ctx.input.mouse_button)));
         t.ctx.pointerDown();
         t.frame();
         var i: f32 = 1;
@@ -154,8 +162,10 @@ pub const Tester = struct {
             t.ctx.input.mouse = .{ .x = x1 + (x2 - x1) * i / 8, .y = y1 + (y2 - y1) * i / 8 };
             t.frame();
         }
-        t.ctx.pointerUp();
-        t.frame();
+        if (t.pointer_buttons.release(@fromBackingInt(@intCast(t.ctx.input.mouse_button)))) {
+            t.ctx.pointerUp();
+            t.frame();
+        }
     }
 
     pub fn typeText(t: *Tester, s: []const u8) void {

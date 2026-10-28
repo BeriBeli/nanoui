@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     var state: State = .{ .mode = if (options.mode == .suite) .idle else options.mode };
+    defer state.field.deinit();
     if (options.snapshot) |path| {
         // Build directly with the portable Tester: no AppKit, Metal, GTK,
         // display connection or window is needed for these functional checks.

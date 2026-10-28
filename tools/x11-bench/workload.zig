@@ -59,6 +59,7 @@ pub const State = struct {
 
 test "input is acknowledged and workloads render offscreen without animation" {
     var s: State = .{ .mode = .input };
+    defer s.field.deinit();
     var t: ui.Tester = undefined;
     try t.init(std.testing.allocator, .init(&s, State.view), .{ .width = 1100, .height = 720, .scale = 1 });
     defer t.deinit();
@@ -76,6 +77,7 @@ test "input is acknowledged and workloads render offscreen without animation" {
 
 test "idle leaves pixels unchanged and small workload damages only its patch" {
     var s: State = .{ .mode = .small };
+    defer s.field.deinit();
     var t: ui.Tester = undefined;
     try t.init(std.testing.allocator, .init(&s, State.view), .{ .width = 1100, .height = 720, .scale = 1 });
     defer t.deinit();

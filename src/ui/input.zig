@@ -186,6 +186,23 @@ pub const KeyState = struct {
 /// the left one's; `right_clicked` and `middle_clicked` the others'.
 pub const Button = enum(u8) { left = 1, right = 2, middle = 3 };
 
+/// Physical presses outlive a UI gesture (a context menu clears Input.down).
+/// Backends must still deliver each owned release once to raw input consumers.
+pub const Buttons = struct {
+    pressed: [3]bool = @splat(false),
+
+    pub fn press(self: *Buttons, button: Button) void {
+        self.pressed[@backingInt(button) - 1] = true;
+    }
+
+    pub fn release(self: *Buttons, button: Button) bool {
+        const down = &self.pressed[@backingInt(button) - 1];
+        if (!down.*) return false;
+        down.* = false;
+        return true;
+    }
+};
+
 /// Where a scroll gesture is: a trackpad's fingers, then its momentum.
 pub const ScrollPhase = enum { none, began, changed, ended, momentum };
 

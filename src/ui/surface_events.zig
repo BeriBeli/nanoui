@@ -125,6 +125,7 @@ fn press(obj: objc.Object, event: objc.Object, button: input.Button) void {
         }
         if (s.ctx.startsWindowDrag()) return objc.msg(void, s.window.nswindow, "performWindowDragWithEvent:", .{event});
     }
+    s.pointer_buttons.press(button);
     s.ctx.text_menu = false;
     if (eff_button == .right) s.ctx.secondaryDown();
     s.ctx.pointerDown();
@@ -143,9 +144,10 @@ fn press(obj: objc.Object, event: objc.Object, button: input.Button) void {
 
 fn release(obj: objc.Object, event: objc.Object, button: input.Button) void {
     const s = surfaceOf(obj) orelse return;
-    // Another button's release, or one whose press went elsewhere.
-    if (s.ctx.input.mouse_button != @backingInt(button) or !s.ctx.input.down) return;
+    // Context menus end UI gestures before the physical button is released.
+    if (!s.pointer_buttons.release(button)) return;
     setMouse(s, event);
+    s.ctx.input.mouse_button = @backingInt(button);
     s.ctx.updateHot();
     s.ctx.pointerUp();
     s.frame();
