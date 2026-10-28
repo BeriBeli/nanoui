@@ -170,10 +170,10 @@ pub fn Tracker(comptime Instance: type, comptime Adapter: type) type {
 pub fn GpuAdapter(comptime Instance: type) type {
     // An upstream draw field must be reviewed explicitly rather than silently
     // becoming invisible to damage comparison when nanoui changes its layout.
-    if (std.meta.fieldNames(Instance).len != 9 or @sizeOf(Instance) != 96) @compileError("review GpuAdapter for changed gpu.Instance layout");
+    if (std.meta.fieldNames(Instance).len != 12 or @sizeOf(Instance) != 144) @compileError("review GpuAdapter for changed gpu.Instance layout");
     return struct {
         pub fn equal(a: Instance, b: Instance) bool {
-            inline for (.{ "rect", "color", "border_color", "uv", "clip" }) |field| {
+            inline for (.{ "rect", "color", "border_color", "uv", "clip", "xf", "pulse", "vel" }) |field| {
                 if (!equalFloats(@field(a, field), @field(b, field))) return false;
             }
             inline for (.{ "radius", "border_width", "kind", "clip_round" }) |field| {
@@ -183,18 +183,46 @@ pub fn GpuAdapter(comptime Instance: type) type {
         }
         pub fn bounds(instance: Instance, frame: Frame) !?Rect {
             if (!frame.valid()) return error.InvalidFrame;
-            inline for (.{ "rect", "color", "border_color", "uv", "clip" }) |field| {
+            inline for (.{ "rect", "color", "border_color", "uv", "clip", "xf", "pulse", "vel" }) |field| {
                 for (@field(instance, field)) |v| if (!std.math.isFinite(v)) return error.InvalidGeometry;
             }
             inline for (.{ "radius", "border_width", "kind", "clip_round" }) |field| {
                 if (!std.math.isFinite(@field(instance, field))) return error.InvalidGeometry;
             }
-            const grow: f32 = if (instance.kind == 2) @max(0, instance.border_width * 3) else 0;
+            const grow: f32 = if (instance.kind == 2 or instance.kind == 5) @max(0, instance.border_width * 3) else 0;
             if (!std.math.isFinite(grow)) return error.InvalidGeometry;
-            const x0 = @max(instance.rect[0] - grow, instance.clip[0]);
-            const y0 = @max(instance.rect[1] - grow, instance.clip[1]);
-            const x1 = @min(instance.rect[0] + instance.rect[2] + grow, instance.clip[2]);
-            const y1 = @min(instance.rect[1] + instance.rect[3] + grow, instance.clip[3]);
+            var rx0 = instance.rect[0] - grow;
+            var ry0 = instance.rect[1] - grow;
+            var rx1 = instance.rect[0] + instance.rect[2] + grow;
+            var ry1 = instance.rect[1] + instance.rect[3] + grow;
+            if (instance.xf[0] != 0) {
+                const ca = @cos(instance.xf[0]);
+                const sa = @sin(instance.xf[0]);
+                const px = instance.xf[2];
+                const py = instance.xf[3];
+                const xs = [4]f32{ rx0, rx1, rx0, rx1 };
+                const ys = [4]f32{ ry0, ry0, ry1, ry1 };
+                rx0 = std.math.inf(f32);
+                ry0 = std.math.inf(f32);
+                rx1 = -std.math.inf(f32);
+                ry1 = -std.math.inf(f32);
+                for (xs, ys) |x, y| {
+                    const dx = x - px;
+                    const dy = y - py;
+                    const tx = px + ca * dx - sa * dy;
+                    const ty = py + sa * dx + ca * dy;
+                    if (!std.math.isFinite(tx) or !std.math.isFinite(ty)) return error.InvalidGeometry;
+                    rx0 = @min(rx0, tx);
+                    ry0 = @min(ry0, ty);
+                    rx1 = @max(rx1, tx);
+                    ry1 = @max(ry1, ty);
+                }
+            }
+            if (!std.math.isFinite(rx0) or !std.math.isFinite(ry0) or !std.math.isFinite(rx1) or !std.math.isFinite(ry1)) return error.InvalidGeometry;
+            const x0 = @max(rx0, instance.clip[0]);
+            const y0 = @max(ry0, instance.clip[1]);
+            const x1 = @min(rx1, instance.clip[2]);
+            const y1 = @min(ry1, instance.clip[3]);
             if (x1 <= x0 or y1 <= y0) return null;
             const px0 = pixel(x0, frame.scale, frame.width, false);
             const py0 = pixel(y0, frame.scale, frame.height, false);

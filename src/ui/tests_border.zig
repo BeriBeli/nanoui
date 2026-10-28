@@ -65,7 +65,7 @@ test "a shadow's spread grows or shrinks its box before the blur; layers stack" 
 }
 
 test "a dashed border: dashes twice its width, gaps once, round the box" {
-    const raster = @import("raster.zig");
+    const raster = @import("raster_shapes.zig");
     // A 1-point border round a 100 by 50 box, corners 10.
     const w: f32 = 1;
     // Along the top: dashes and gaps alternate; most of a period is dash.

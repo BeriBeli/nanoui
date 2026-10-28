@@ -71,7 +71,7 @@ pub const Surface = struct {
         }
         var volatile_frame = false;
         for (instances) |instance| {
-            if (instance.kind == gpu.Kind.glass or instance.kind == gpu.Kind.texture) {
+            if (instance.kind == gpu.Kind.glass or instance.kind == gpu.Kind.texture or instance.kind == gpu.Kind.layer_begin) {
                 volatile_frame = true;
                 break;
             }

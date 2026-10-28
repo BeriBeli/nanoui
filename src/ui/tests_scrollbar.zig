@@ -32,12 +32,12 @@ test "a scrollbar thumb drag scrolls and its release is not a click" {
     try testing.expectEqual(@as(usize, 0), p.clicks);
 }
 
-test "a drag outside the thumb does not scroll" {
+test "a track press jumps to the pointer and its drag keeps scrolling" {
     var p: Page = .{};
     var t: ui.Tester = undefined;
     try t.init(testing.allocator, .init(&p, Page.view), .{ .width = 200, .height = 120 });
     defer t.deinit();
 
     t.drag(96, 80, 96, 90);
-    try testing.expectEqual(@as(f32, 0), t.ctx.scroll.get(p.id) orelse 0);
+    try testing.expectEqual(@as(f32, 100), t.ctx.scroll.get(p.id) orelse 0);
 }

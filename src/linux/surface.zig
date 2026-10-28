@@ -238,6 +238,10 @@ pub const Surface = struct {
             .text => "text",
             .resize_left_right => "col-resize",
             .resize_up_down => "row-resize",
+            .open_hand => "grab",
+            .closed_hand => "grabbing",
+            .not_allowed => "not-allowed",
+            .crosshair => "crosshair",
         };
         const cursor = gtk.v3.gdk_cursor_new_from_name(g.gdk_display_get_default(), name);
         gtk.v3.gdk_window_set_cursor(win, cursor);

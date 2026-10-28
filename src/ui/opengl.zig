@@ -88,7 +88,7 @@ pub const Renderer = struct {
         g.glGenBuffers(1, &r.vbo);
         g.glBindVertexArray(r.vao);
         g.glBindBuffer(gl.ARRAY_BUFFER, r.vbo);
-        for (0..6) |k| {
+        for (0..9) |k| {
             g.glEnableVertexAttribArray(@intCast(k));
             g.glVertexAttribDivisor(@intCast(k), 1);
         }
@@ -140,7 +140,7 @@ pub const Renderer = struct {
 
     /// Draws `instances` over `clear`, `size` points at `scale`, into the
     /// renderer's frame, then copies it to framebuffer `target`.
-    pub fn draw(r: *Renderer, instances: []const gpu.Instance, size: types.Size, scale: f32, clear: types.Color, target: u32) void {
+    pub fn draw(r: *Renderer, instances: []const gpu.Instance, size: types.Size, scale: f32, clear: types.Color, target: u32, time: f64) void {
         const g = &gl.api;
         const w: usize = @intFromFloat(@max(1, @round(size.w * scale)));
         const h: usize = @intFromFloat(@max(1, @round(size.h * scale)));
@@ -161,9 +161,9 @@ pub const Renderer = struct {
             // What comes before the next pane, in one draw.
             var end = first;
             while (end < instances.len and instances[end].kind != gpu.Kind.glass) end += 1;
-            r.drawRange(r.quad, size, scale, first, end - first);
+            r.drawRange(r.quad, size, scale, first, end - first, time);
             if (end == instances.len) break;
-            r.drawPane(instances, end, size, scale);
+            r.drawPane(instances, end, size, scale, time);
             first = end + 1;
         }
         g.glBindFramebuffer(gl.READ_FRAMEBUFFER, r.frame.fbo);
@@ -200,17 +200,18 @@ pub const Renderer = struct {
     }
 
     /// Draws instances [first, first + count) with `prog`.
-    fn drawRange(r: *Renderer, prog: u32, size: types.Size, scale: f32, first: usize, count: usize) void {
+    fn drawRange(r: *Renderer, prog: u32, size: types.Size, scale: f32, first: usize, count: usize, time: f64) void {
         if (count == 0) return;
         const g = &gl.api;
         g.glUseProgram(prog);
         g.glUniform2f(g.glGetUniformLocation(prog, "viewport"), size.w, size.h);
         g.glUniform1f(g.glGetUniformLocation(prog, "scale"), scale);
+        g.glUniform1f(g.glGetUniformLocation(prog, "time"), @floatCast(time));
         g.glBindVertexArray(r.vao);
         g.glBindBuffer(gl.ARRAY_BUFFER, r.vbo);
         // The instances from `first` on: rect, colors, uv, clip, then the
         // four floats after them.
-        for (0..6) |k| g.glVertexAttribPointer(@intCast(k), 4, gl.FLOAT, 0, stride, first * stride + k * 16);
+        for (0..9) |k| g.glVertexAttribPointer(@intCast(k), 4, gl.FLOAT, 0, stride, first * stride + k * 16);
         g.glEnable(gl.BLEND);
         // Premultiplied alpha: one, one minus source alpha.
         g.glBlendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -220,7 +221,7 @@ pub const Renderer = struct {
     }
 
     /// Pane `at`: its backdrop from what was drawn, then the pane.
-    fn drawPane(r: *Renderer, instances: []const gpu.Instance, at: usize, size: types.Size, scale: f32) void {
+    fn drawPane(r: *Renderer, instances: []const gpu.Instance, at: usize, size: types.Size, scale: f32, time: f64) void {
         const g = &gl.api;
         const b = glass.backdropOf(instances[at].rect, instances[at].border_width, scale, r.frame.w, r.frame.h) orelse return;
         const w: usize = @intCast(b.w);
@@ -250,7 +251,7 @@ pub const Renderer = struct {
         g.glUniform2f(g.glGetUniformLocation(r.pane, "size"), @floatFromInt(b.w), @floatFromInt(b.h));
         g.glUniform1f(g.glGetUniformLocation(r.pane, "down"), @floatFromInt(b.down));
         bindTexture(r.pane, "backdrop", 2, r.a.texture);
-        r.drawRange(r.pane, size, scale, at, 1);
+        r.drawRange(r.pane, size, scale, at, 1, time);
     }
 
     /// One pass of a pane's backdrop: `prog` reading `src` into `dst`'s

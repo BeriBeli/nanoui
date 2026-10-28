@@ -110,7 +110,11 @@ pub const Weight = enum { regular, medium, semibold, bold, light };
 pub const Shadow = struct {
     color: Color = .{ .a = 0.18 },
     blur: f32 = 12,
+    x: f32 = 0,
     y: f32 = 4,
+    /// Drawn outside the box only (`Kind.shadow_out`): a box that shows
+    /// what is under it (a page through a stage hole) keeps its shadow.
+    knockout: bool = false,
     /// Grows the shadow's box on every side before it's blurred; less than
     /// 0 shrinks it, as CSS's spread radius does.
     spread: f32 = 0,
@@ -139,6 +143,8 @@ pub const Glass = struct {
         clear,
     };
 };
+
+pub const Pulse = struct { period: f32, scale_amp: f32, alpha_low: f32 };
 
 /// How a scrolling box shows its bar.
 pub const Scrollbar = union(enum) {
@@ -173,6 +179,8 @@ pub const Style = struct {
     /// round the whole box (GPUI's `border_dashed`).
     border_dashed: bool = false,
     radius: f32 = 0,
+    /// Circular corners instead of Apple's continuous corners.
+    corner_circular: bool = false,
     shadow: ?Shadow = null,
     /// More shadows under the box, after `shadow`: layered ones.
     shadows: []const Shadow = &.{},
@@ -187,9 +195,6 @@ pub const Style = struct {
     opacity: f32 = 1,
     /// Moves the box after layout, without moving its siblings.
     offset: Point = .{},
-    /// Draws the box and its content larger or smaller about its center,
-    /// after layout (its siblings, and where it takes clicks, stay put).
-    scale: f32 = 1,
     /// Glides when the layout moves it (`ui.motion`'s `layout`): its id.
     layout_motion: u64 = 0,
     /// Out of the flow: placed at its parent's content origin (plus
@@ -210,10 +215,39 @@ pub const Style = struct {
     /// Its texts (and its children's) can be selected with the pointer and
     /// copied, as a terminal's or a page's (`selection.zig`).
     selectable: bool = false,
+    /// A single press on it moves the window, as a title bar's does (a
+    /// tab strip's empty space); a double click still comes to the box.
+    window_drag: bool = false,
     /// A control (a button, a toggle): its texts do not select, even in a
     /// selectable box, so the pointer is a hand all over it.
     control: bool = false,
+    /// The box and everything in it drawn scaled by this around
+    /// `scale_anchor` (fractions of its rect), after layout: an item
+    /// entering or leaving.
+    scale: f32 = 1,
+    scale_anchor: Point = .{ .x = 0.5, .y = 0.5 },
+    /// Children are laid out at their own widths, clipped to the box, and
+    /// scroll horizontally (the wheel's x, or `Context.setScroll`).
+    scroll_x: bool = false,
+    /// A scrolling box shows its scroll indicator.
+    scroll_bar: bool = true,
+    /// The indicator shows only while the box scrolls and a moment after,
+    /// as macOS's overlay scrollers.
+    scroll_bar_fades: bool = false,
+    /// A box whose place down its parent changes from one layout to the
+    /// next (a row above it gone) springs from where it was shown to where
+    /// it is, as SwiftUI animates a stack's rows; its ancestors' offsets
+    /// and scrolling aside.
+    settle_y: ?Spring = null,
+    rotation: f32 = 0,
+    spin: f32 = 0,
+    pulse: ?Pulse = null,
+    motion_blur: bool = false,
+    group: bool = false,
 };
+
+/// A spring as SwiftUI writes one (`motion.zig`).
+pub const Spring = struct { response: f32, damping: f32 };
 
 /// Bytes [start, end) of a text drawn their own way: a color (ANSI
 /// output, syntax), and for rich text a weight, italics, the monospaced
@@ -254,13 +288,35 @@ pub const TextStyle = struct {
     /// monospaced font looks larger at the same size; 1 keeps it.
     mono_scale: f32 = 0.9,
     /// A line longer than its box (text that doesn't wrap): cut before an
-    /// ellipsis, or faded out over its last `fade_width` points. Such text
-    /// gives room back in a row, as wrapping text does.
+    /// ellipsis, faded toward its end, or shortened through its middle.
     truncate: Truncate = .none,
     fade_width: f32 = 24,
+    /// Glyphs fade out toward the box's right edge.
+    fade: ?Fade = null,
+    /// Wrapped text keeps at most this many lines (0: all of them), the
+    /// last ending in "…" when text was dropped.
+    max_lines: u8 = 0,
+    /// Digits all as wide (monospaced numbers): counters, clocks, sizes.
+    tabular: bool = false,
+    /// Points added after each character (letter spacing).
+    tracking: f32 = 0,
+    /// The system face's rounded design (SF Rounded); others keep their own.
+    rounded: bool = false,
+
+    /// Cut to one line that fits, at its end or in its middle.
+    pub fn cuts(s: TextStyle) bool {
+        return s.truncate == .ellipsis or s.truncate == .middle;
+    }
 };
 
-pub const Truncate = enum { none, ellipsis, fade };
+pub const Truncate = enum { none, ellipsis, middle, fade };
+
+/// Glyphs within `clear` points of the box's right edge are transparent;
+/// they reach full opacity `ramp` points further left.
+pub const Fade = struct {
+    clear: f32,
+    ramp: f32,
+};
 
 test "rect" {
     const r: Rect = .{ .x = 10, .y = 10, .w = 100, .h = 50 };

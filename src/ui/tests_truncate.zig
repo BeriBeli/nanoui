@@ -37,7 +37,7 @@ test "a long line fades out or ends in an ellipsis, and what follows it stays wh
         // The row is 200 wide from x = 10: "6m" ends inside it.
         try testing.expect(time.x + time.w <= 210.5);
         var title_box: ?ui.Rect = null;
-        for (t.ctx.nodes.items) |n| if (n.content == .text and n.content.text.str.len == title.len) {
+        for (t.ctx.nodes.items) |n| if (n.content == .text and !std.mem.eql(u8, n.content.text.str, "6m")) {
             title_box = n.rect;
         };
         const r = title_box.?;

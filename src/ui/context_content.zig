@@ -57,5 +57,6 @@ pub const Content = union(enum) {
         lines: []const text.Line = &.{},
         /// Colored byte ranges, sorted; the rest is drawn in `color`.
         spans: []const types.Span = &.{},
+        cut_lay: ?text.Layout = null,
     };
 };

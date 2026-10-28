@@ -3,6 +3,7 @@
 //! that is not installed falls back to the system's; a family without
 //! italics is slanted, as browsers synthesize them.
 const std = @import("std");
+const builtin = @import("builtin");
 const objc = @import("../objc.zig");
 const cf = @import("cf.zig");
 const types = @import("types.zig");
@@ -139,3 +140,41 @@ extern "c" fn CTFontCopyTraits(cf.CTFontRef) ?cf.CFDictionaryRef;
 extern "c" fn CFDictionaryGetValue(cf.CFDictionaryRef, ?*const anyopaque) ?*const anyopaque;
 extern "c" fn CFNumberGetValue(*const anyopaque, cf.CFIndex, *anyopaque) bool;
 extern "c" fn CTFontCopyPostScriptName(cf.CTFontRef) cf.CFStringRef;
+extern "c" fn CTFontCopyFontDescriptor(font: cf.CTFontRef) *anyopaque;
+extern "c" fn CTFontDescriptorCreateCopyWithFeature(desc: *anyopaque, feature_type: *anyopaque, selector: *anyopaque) ?*anyopaque;
+/// `kNumberSpacingType`, `kMonospacedNumbersSelector` (SFNTLayoutTypes.h).
+const number_spacing: i32 = 6;
+const monospaced_numbers: i32 = 0;
+
+/// `base` with monospaced (tabular) digits, released.
+pub fn tabular(base: cf.CTFontRef) cf.CTFontRef {
+    defer cf.CFRelease(base);
+    const kind = CFNumberCreate(null, kCFNumberSInt32Type, &number_spacing) orelse return @ptrCast(cf.CFRetain(base));
+    defer cf.CFRelease(kind);
+    const sel = CFNumberCreate(null, kCFNumberSInt32Type, &monospaced_numbers) orelse return @ptrCast(cf.CFRetain(base));
+    defer cf.CFRelease(sel);
+    const own = CTFontCopyFontDescriptor(base);
+    defer cf.CFRelease(own);
+    const desc = CTFontDescriptorCreateCopyWithFeature(own, kind, sel) orelse return @ptrCast(cf.CFRetain(base));
+    defer cf.CFRelease(desc);
+    // Size 0 and no matrix: the font's own (an italic's slant kept).
+    return CTFontCreateCopyWithAttributes(base, 0, null, desc) orelse @ptrCast(cf.CFRetain(base));
+}
+
+extern "c" const NSFontDescriptorSystemDesignRounded: objc.Object;
+extern "c" const UIFontDescriptorSystemDesignRounded: objc.Object;
+
+/// `base` in the system's rounded design (SF Rounded), released; `base`
+/// itself where the face has none (a named family).
+pub fn rounded(base: cf.CTFontRef) cf.CTFontRef {
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const font: objc.Object = @ptrCast(base);
+    const desc = objc.msg(objc.Object, font, "fontDescriptor", .{});
+    const design = if (builtin.os.tag == .ios) UIFontDescriptorSystemDesignRounded else NSFontDescriptorSystemDesignRounded;
+    const round = objc.msg(?objc.Object, desc, "fontDescriptorWithDesign:", .{design}) orelse return base;
+    // Size 0: the descriptor's own.
+    const made = objc.msg(?objc.Object, objc.class(objc.font_class), "fontWithDescriptor:size:", .{ round, @as(f64, 0) }) orelse return base;
+    cf.CFRelease(base);
+    return @ptrCast(objc.retain(made));
+}

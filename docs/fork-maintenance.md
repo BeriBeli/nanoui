@@ -1,6 +1,6 @@
 # Linux/X11 fork maintenance
 
-The stable baseline is upstream v0.7.1. This fork owns its old-Linux and
+The stable baseline is upstream v0.8.0. This fork owns its old-Linux and
 X11/VDI compatibility code, regression tests and standalone benchmark.
 Letty consumes a full commit and checksum-verified source archive directly;
 it does not replay nanoui patches or supply framework font I/O symbols.
@@ -24,11 +24,24 @@ CPU backing used by the supported GTK 3 path. Snapshot and workload tests run
 offscreen. Its Linux package includes source hashes and an ELF ABI audit.
 Old benchmark reports continue to certify only their recorded implementations.
 
-The v0.7.1 merge retains the fork's image-sink binding, color-font masks,
+The v0.8.0 merge retains the fork's image-sink binding, color-font masks,
 font-feature cache keys, raw pointer buttons and terminal wheel metadata.
 Native secondary clicks also reach upstream context menus without activating
 primary widgets. macOS built-in scroll views use upstream display pacing;
 product wheel consumers keep their discrete steps, horizontal delta and phase.
+
+The release adds text areas and focus traversal, drag/drop and accessibility,
+macOS display-link pacing, text effects, motion helpers and CPU/OpenGL shadow
+parity. The 144-byte draw instance includes transforms, pulse and velocity;
+damage comparison validates all fields and encloses rotated/knockout shadows.
+Grouped opacity redraws fully because its offscreen composition spans children.
+The fork retains its numeric mouse contract (1 left, 2 right, 3 middle), maps
+upstream Tester button helpers to it, and suppresses primary UI gestures on raw
+secondary presses. Color-glyph masks and failure-aware atlas replacement also
+remain active alongside the release's dark-on-light glyph masks.
+
+See the [0.8.0 migration review](nanoui-0.8.0-migration.md) for the downstream
+keep/replace decisions and retired implementations.
 
 ## Maintenance checks
 

@@ -74,7 +74,7 @@ fn compare(t: *ui.Tester, limits: Limits, es: bool) !void {
     var r = if (es) try Renderer.initEs() else try Renderer.init();
     defer r.deinit();
     r.sync(t.text.atlas.mask(), t.text.atlas.generation, t.text.images.pictures(), t.text.images.generation);
-    r.draw(t.instances.items, t.size, t.scale, t.theme.background, 0);
+    r.draw(t.instances.items, t.size, t.scale, t.theme.background, 0, t.ctx.time);
     const ours = try r.read(gpa);
     defer ours.deinit(gpa);
     const cpu = try t.render(gpa);

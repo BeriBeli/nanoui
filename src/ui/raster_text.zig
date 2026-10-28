@@ -5,6 +5,7 @@ const raster = @import("raster.zig");
 const blend = raster.blend;
 const clipCover = raster.clipCover;
 const unit = raster.unit;
+const unrotate = raster.unrotate;
 
 /// The glyph atlas, as the shader samples it: one byte per texel.
 pub const Mask = struct {
@@ -41,15 +42,18 @@ pub fn glyph(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, scale: f32, b:
     if (mask.size == 0) return;
     const inv = 1 / scale;
     const c = i.color;
+    const rot = i.xf[0] != 0;
     for (b[1]..b[3]) |y| {
         const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
-        const ty = (wy - i.rect[1]) / i.rect[3];
-        const v = i.uv[1] + (i.uv[3] - i.uv[1]) * ty;
         const row = y * out.width * 4;
         for (b[0]..b[2]) |x| {
             const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
-            const tx = (wx - i.rect[0]) / i.rect[2];
+            const up = unrotate(i, wx, wy);
+            if (rot and (up[0] < i.rect[0] or up[1] < i.rect[1] or up[0] > i.rect[0] + i.rect[2] or up[1] > i.rect[1] + i.rect[3])) continue;
+            const tx = (up[0] - i.rect[0]) / i.rect[2];
+            const ty = (up[1] - i.rect[1]) / i.rect[3];
             const u = i.uv[0] + (i.uv[2] - i.uv[0]) * tx;
+            const v = i.uv[1] + (i.uv[3] - i.uv[1]) * ty;
             var opacity = c[3] * clipCover(i, wx, wy, inv);
             // A truncated line fading out, as the shader fades it.
             if (i.border_width > 0) opacity *= std.math.clamp((i.radius - wx) / i.border_width, 0, 1);

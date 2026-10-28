@@ -7,7 +7,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "codex/x11-v0.7.*"]
+    branches: [main, "codex/x11-v0.7.*", "codex/x11-v0.8.*"]
   pull_request:
 
 permissions:

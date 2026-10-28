@@ -4,7 +4,7 @@
 //! no GPU renderer, and the Tester renders with it there. A test proves it
 //! matches the Metal renderer.
 const std = @import("std");
-const shapes = @import("raster_shapes.zig");
+pub const shapes = @import("raster_shapes.zig");
 const types = @import("types.zig");
 const gpu = @import("gpu.zig");
 const glass = @import("glass.zig");
@@ -32,6 +32,27 @@ pub fn draw(out: gpu.Pixels, instances: []const gpu.Instance, mask: Mask, pictur
 pub fn drawRegion(out: gpu.Pixels, instances: []const gpu.Instance, mask: Mask, pictures: Pictures, scale: f32, clear: types.Color, region: [4]usize) void {
     const alpha = if (mask.native_pixels.len > 0) clear.a else 1;
     const px: [4]u8 = .{ unit(clear.b * alpha), unit(clear.g * alpha), unit(clear.r * alpha), unit(alpha) };
+    for (instances) |*inst_chk| if (inst_chk.kind == gpu.Kind.layer_begin) {
+        const words: []u32 = @alignCast(std.mem.bytesAsSlice(u32, out.bytes[0 .. out.width * out.height * 4]));
+        for (region[1]..region[3]) |y| @memset(words[y * out.width + region[0] .. y * out.width + region[2]], @bitCast(px));
+        var k: usize = 0;
+        while (k < instances.len) {
+            const inst = &instances[k];
+            if (inst.kind == gpu.Kind.layer_begin) {
+                var end_at = k + 1;
+                while (end_at < instances.len and instances[end_at].kind != gpu.Kind.layer_end) : (end_at += 1) {}
+                if (end_at > k + 1 and end_at < instances.len) {
+                    drawGroup(out, instances[k + 1 .. end_at], &instances[k], &instances[end_at], mask, pictures, scale, region);
+                }
+                k = if (end_at < instances.len) end_at + 1 else instances.len;
+                continue;
+            }
+            drawOne(out, inst, mask, pictures, scale, region);
+            k += 1;
+        }
+        return;
+    };
+
     var job: Band = .{ .out = out, .instances = instances, .mask = mask, .pictures = pictures, .scale = scale, .clear = @bitCast(px), .region = region };
     // Glass reads what's drawn beyond its band: the bands meet before each
     // pane, which one thread draws.
@@ -128,7 +149,6 @@ pub fn damage(width: usize, height: usize, old: []const gpu.Instance, new: []con
     }
     return region;
 }
-
 fn same(a: *const gpu.Instance, b: *const gpu.Instance) bool {
     return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
 }
@@ -137,19 +157,81 @@ fn cover(region: *?[4]usize, b: ?[4]usize) void {
     const add = b orelse return;
     region.* = if (region.*) |r| .{ @min(r[0], add[0]), @min(r[1], add[1]), @max(r[2], add[2]), @max(r[3], add[3]) } else add;
 }
-
+fn drawGroup(out: gpu.Pixels, span: []const gpu.Instance, begin_inst: *const gpu.Instance, end_inst: *const gpu.Instance, mask: Mask, pictures: Pictures, scale: f32, region: [4]usize) void {
+    for (span) |*gi| {
+        if (gi.kind == gpu.Kind.glass) drawOne(out, gi, mask, pictures, scale, region);
+    }
+    const b = bounds(out, begin_inst, scale) orelse return;
+    const tmp_bytes = std.heap.page_allocator.alloc(u8, out.width * out.height * 4) catch return;
+    defer std.heap.page_allocator.free(tmp_bytes);
+    @memset(tmp_bytes, 0);
+    const tmp: gpu.Pixels = .{ .bytes = tmp_bytes, .width = out.width, .height = out.height };
+    for (span) |*gi| {
+        if (gi.kind == gpu.Kind.glass or gi.kind == gpu.Kind.layer_begin or gi.kind == gpu.Kind.layer_end) continue;
+        drawOne(tmp, gi, mask, pictures, scale, region);
+    }
+    const alpha = std.math.clamp(end_inst.color[3], 0, 1);
+    if (alpha <= 0) return;
+    const inv = 1 / scale;
+    for (b[1]..b[3]) |y| {
+        const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
+        const row = y * out.width * 4;
+        for (b[0]..b[2]) |x| {
+            const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
+            const s = tmp.bytes[row + x * 4 ..][0..4];
+            if (s[3] == 0) continue;
+            const k = alpha * clipCover(end_inst, wx, wy, inv) / 255.0;
+            blend(out.bytes, row + x * 4, @as(f32, @floatFromInt(s[2])) * k, @as(f32, @floatFromInt(s[1])) * k, @as(f32, @floatFromInt(s[0])) * k, @as(f32, @floatFromInt(s[3])) * k);
+        }
+    }
+}
 pub fn unit(v: f32) u8 {
     return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
+}
+pub inline fn unrotate(i: *const gpu.Instance, wx: f32, wy: f32) [2]f32 {
+    const a = i.xf[0];
+    if (a == 0) return .{ wx, wy };
+    const dx = wx - i.xf[2];
+    const dy = wy - i.xf[3];
+    const ca = @cos(a);
+    const sa = @sin(a);
+    return .{ i.xf[2] + ca * dx + sa * dy, i.xf[3] - sa * dx + ca * dy };
 }
 
 /// The pixels an instance covers: its quad (grown for a shadow's blur),
 /// within its clip and the frame.
-fn bounds(out: gpu.Pixels, i: *const gpu.Instance, scale: f32) ?[4]usize {
-    const grow: f32 = if (i.kind == gpu.Kind.shadow) i.border_width * 3 else 0;
-    const x0 = @max(i.rect[0] - grow, i.clip[0]);
-    const y0 = @max(i.rect[1] - grow, i.clip[1]);
-    const x1 = @min(i.rect[0] + i.rect[2] + grow, i.clip[2]);
-    const y1 = @min(i.rect[1] + i.rect[3] + grow, i.clip[3]);
+pub fn bounds(out: gpu.Pixels, i: *const gpu.Instance, scale: f32) ?[4]usize {
+    const grow: f32 = if (i.kind == gpu.Kind.shadow or i.kind == gpu.Kind.shadow_out) i.border_width * 3 else 0;
+    var rx0 = i.rect[0] - grow;
+    var ry0 = i.rect[1] - grow;
+    var rx1 = i.rect[0] + i.rect[2] + grow;
+    var ry1 = i.rect[1] + i.rect[3] + grow;
+    if (i.xf[0] != 0) {
+        const ca = @cos(i.xf[0]);
+        const sa = @sin(i.xf[0]);
+        const px = i.xf[2];
+        const py = i.xf[3];
+        const xs = [4]f32{ rx0, rx1, rx0, rx1 };
+        const ys = [4]f32{ ry0, ry0, ry1, ry1 };
+        rx0 = 1e9;
+        ry0 = 1e9;
+        rx1 = -1e9;
+        ry1 = -1e9;
+        for (0..4) |k| {
+            const dx = xs[k] - px;
+            const dy = ys[k] - py;
+            const tx = px + ca * dx - sa * dy;
+            const ty = py + sa * dx + ca * dy;
+            rx0 = @min(rx0, tx);
+            ry0 = @min(ry0, ty);
+            rx1 = @max(rx1, tx);
+            ry1 = @max(ry1, ty);
+        }
+    }
+    const x0 = @max(rx0, i.clip[0]);
+    const y0 = @max(ry0, i.clip[1]);
+    const x1 = @min(rx1, i.clip[2]);
+    const y1 = @min(ry1, i.clip[3]);
     if (x1 <= x0 or y1 <= y0) return null;
     const w: f32 = @floatFromInt(out.width);
     const h: f32 = @floatFromInt(out.height);
@@ -163,6 +245,7 @@ fn bounds(out: gpu.Pixels, i: *const gpu.Instance, scale: f32) ?[4]usize {
 }
 
 fn drawOne(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, pictures: Pictures, scale: f32, region: [4]usize) void {
+    if (i.kind == gpu.Kind.layer_begin or i.kind == gpu.Kind.layer_end or i.kind == gpu.Kind.layer_composite) return;
     const all = bounds(out, i, scale) orelse return;
     const b: [4]usize = .{ @max(all[0], region[0]), @max(all[1], region[1]), @min(all[2], region[2]), @min(all[3], region[3]) };
     if (b[2] <= b[0] or b[3] <= b[1]) return;
@@ -173,7 +256,7 @@ fn drawOne(out: gpu.Pixels, i: *const gpu.Instance, mask: Mask, pictures: Pictur
         if (slot < pictures.textures.len) picture(out, i, .texture(pictures.textures[slot]), scale, b);
         return;
     }
-    if (i.kind == gpu.Kind.shadow) return shadow(out, i, scale, b);
+    if (i.kind == gpu.Kind.shadow or i.kind == gpu.Kind.shadow_out) return shadow(out, i, scale, b);
     if (i.kind == gpu.Kind.glass) return pane(out, i, scale, b);
     if (i.kind == gpu.Kind.segment) return shapes.segment(out, i, scale, b);
     if (i.kind == gpu.Kind.triangle) return shapes.triangle(out, i, scale, b);
@@ -198,13 +281,48 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) f32 {
 
 /// The signed distance to a rounded box centered at 0, and the sum of the
 /// absolute values of its gradient (what `fwidth` measures per pixel).
-fn roundedBox(px: f32, py: f32, hw: f32, hh: f32, r: f32) [2]f32 {
+pub fn roundedBox(px: f32, py: f32, hw: f32, hh: f32, r: f32) [2]f32 {
     const qx = @abs(px) - hw + r;
     const qy = @abs(py) - hh + r;
     const mx = @max(qx, 0);
     const my = @max(qy, 0);
     const len = @sqrt(mx * mx + my * my);
     const d = len + @min(@max(qx, qy), 0) - r;
+    const grad: f32 = if (len > 0) (mx + my) / len else 1;
+    return .{ d, grad };
+}
+
+pub fn cornerSdf(px: f32, py: f32, hw: f32, hh: f32, r_in: f32) [2]f32 {
+    const r = @min(@abs(r_in), @min(hw, hh));
+    if (r <= 0 or r_in < 0) return roundedBox(px, py, hw, hh, r);
+    const dx = hw - @abs(px);
+    const dy = hh - @abs(py);
+    const a = @min(dx, dy);
+    const b_val = @max(dx, dy);
+    const half_long = if (dy >= dx) hh else hw;
+    const ext = @min(1.52866495 * r, half_long);
+    if (b_val >= ext) return .{ -a, 1 };
+    if (b_val >= 0.63149399 * r and a > -0.25 * r) {
+        const span = @max(ext - 0.63149399 * r, 1e-5);
+        const u = std.math.clamp((ext - b_val) / span, 0, 1);
+        const uu = u * u;
+        const uuu = uu * u;
+        const c3: f32 = 0.00759166;
+        const c4: f32 = 0.06728002;
+        const c5: f32 = 0.00003973;
+        const indent = r * (c3 * uuu + c4 * uuu * u + c5 * uuu * uu);
+        const slope = r * (3 * c3 * uu + 4 * c4 * uuu + 5 * c5 * uu * uu) / span;
+        const inv_norm = 1 / @sqrt(1 + slope * slope);
+        return .{ (indent - a) * inv_norm, (1 + slope) * inv_norm };
+    }
+    const cx = 0.950248 * r;
+    const cr = 0.931599 * r;
+    const qx = cx - dx;
+    const qy = cx - dy;
+    const mx = @max(qx, 0);
+    const my = @max(qy, 0);
+    const len = @sqrt(mx * mx + my * my);
+    const d = len + @min(@max(qx, qy), 0) - cr;
     const grad: f32 = if (len > 0) (mx + my) / len else 1;
     return .{ d, grad };
 }
@@ -219,28 +337,28 @@ pub inline fn clipCover(i: *const gpu.Instance, wx: f32, wy: f32, inv: f32) f32 
     const hw = (c[2] - c[0]) * 0.5;
     const hh = (c[3] - c[1]) * 0.5;
     const r = @min(round.radius, @min(hw, hh));
+    const reach = @min(1.52866495 * r, @max(hw, hh));
     // Between the corners, nothing is cut.
-    if ((wx > c[0] + r and wx < c[2] - r) or (wy > c[1] + r and wy < c[3] - r)) return 1;
+    if ((wx > c[0] + reach and wx < c[2] - reach) or (wy > c[1] + reach and wy < c[3] - reach)) return 1;
     const qx = wx - c[0] - hw;
     const qy = wy - c[1] - hh;
     const bit: u4 = if (qy < 0) (if (qx < 0) 1 else 2) else (if (qx < 0) 8 else 4);
     if (round.corners & bit == 0) return 1;
-    const sd = roundedBox(qx, qy, hw, hh, r);
+    const sd = cornerSdf(qx, qy, hw, hh, r);
     const aa = @max(sd[1] * inv, 0.0001) * 0.5;
     return 1 - smoothstep(-aa, aa, sd[0]);
 }
-
-fn quad(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
+pub fn quad(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
     // Default unfocused-pane overlays can be completely transparent. A visible
     // border must still render even when the fill itself contributes nothing.
     if (i.color[3] == 0 and (i.border_width <= 0 or i.border_color[3] == 0)) return;
     // Opaque interiors replace the destination. Keep rounded edges, borders
     // and rounded clips on the scalar path, with exactly its pixel geometry.
-    if (i.color[3] != 1 or i.clip_round > 0) return quadScalar(out, i, scale, b);
+    if (i.color[3] != 1 or i.clip_round > 0 or i.xf[0] != 0 or i.radius < 0) return quadScalar(out, i, scale, b);
     for (i.color[0..3]) |v| if (v < 0 or v > 1) return quadScalar(out, i, scale, b);
     const has_border = i.border_width > 0 and i.border_color[3] > 0;
     const radius = @min(i.radius, @min(i.rect[2], i.rect[3]) * 0.5);
-    const inset = @max(radius, if (has_border) i.border_width else 0) + 2 / scale;
+    const inset = @max(radius * 1.52866495, if (has_border) i.border_width else 0) + 2 / scale;
     // Round inward conservatively; every covered pixel center is strictly
     // inside the scalar kernel's solid rectangle, even at fractional scales.
     const inside: [4]usize = .{
@@ -277,34 +395,39 @@ fn quad(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
     if (inside[2] < b[2]) quadScalar(out, i, scale, .{ inside[2], inside[1], b[2], inside[3] });
 }
 
-fn quadScalar(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
+pub fn quadScalar(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
     const hw = i.rect[2] * 0.5;
     const hh = i.rect[3] * 0.5;
     const cx = i.rect[0] + hw;
     const cy = i.rect[1] + hh;
-    const r = @min(i.radius, @min(hw, hh));
+    const r_abs = @min(@abs(i.radius), @min(hw, hh));
+    const r: f32 = if (i.radius < 0) -r_abs else r_abs;
     const bw = i.border_width;
     const has_border = bw > 0 and i.border_color[3] > 0;
     const c = i.color;
     const bc = i.border_color;
     // Inside this, a pixel is wholly the fill: no edge, corner or border.
-    const solid = @max(r, if (has_border) bw else 0) + 2 / scale;
+    const corner_ext: f32 = if (r > 0) 1.52866495 * r else r_abs;
+    const solid = @max(corner_ext, if (has_border) bw else 0) + 2 / scale;
     const inv = 1 / scale;
+    const rot = i.xf[0] != 0;
     for (b[1]..b[3]) |y| {
         const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
-        const py = wy - cy;
         const row = y * out.width * 4;
-        const inner_y = @abs(py) < hh - solid;
+        const inner_y = !rot and @abs(wy - cy) < hh - solid;
         for (b[0]..b[2]) |x| {
             const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
-            const pxl = wx - cx;
+            const u = unrotate(i, wx, wy);
+            if (rot and (u[0] < i.rect[0] or u[1] < i.rect[1] or u[0] > i.rect[0] + i.rect[2] or u[1] > i.rect[1] + i.rect[3])) continue;
+            const pxl = u[0] - cx;
+            const py = u[1] - cy;
             const cut = clipCover(i, wx, wy, inv);
             if (inner_y and @abs(pxl) < hw - solid) {
                 const a = c[3] * cut;
                 blend(out.bytes, row + x * 4, c[0] * a, c[1] * a, c[2] * a, a);
                 continue;
             }
-            const sd = roundedBox(pxl, py, hw, hh, r);
+            const sd = cornerSdf(pxl, py, hw, hh, r);
             const aa = @max(sd[1] * inv, 0.0001) * 0.5;
             const coverage = 1 - smoothstep(-aa, aa, sd[0]);
             if (coverage <= 0) continue;
@@ -314,7 +437,7 @@ fn quadScalar(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) 
                 const t = smoothstep(-bw - aa, -bw + aa, sd[0]);
                 var edge: [4]f32 = .{ bc[0] * bc[3], bc[1] * bc[3], bc[2] * bc[3], bc[3] };
                 if (i.uv[0] > 0.5) {
-                    const dc = dashCover(pxl, py, hw, hh, r, bw, inv);
+                    const dc = shapes.dashCover(pxl, py, hw, hh, r, bw, inv);
                     for (&edge) |*e| e.* *= dc;
                 }
                 for (0..4) |k| col[k] += (edge[k] + col[k] * (1 - edge[3]) - col[k]) * t;
@@ -325,36 +448,6 @@ fn quadScalar(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) 
     }
 }
 
-test "opaque interior fill matches scalar blending including fractional clipped edges" {
-    const a = std.testing.allocator;
-    const actual = try a.alloc(u8, 160 * 100 * 4);
-    defer a.free(actual);
-    const expected = try a.alloc(u8, actual.len);
-    defer a.free(expected);
-    const out: gpu.Pixels = .{ .bytes = actual, .width = 160, .height = 100 };
-    const reference: gpu.Pixels = .{ .bytes = expected, .width = 160, .height = 100 };
-    for ([_]f32{ 0.75, 1, 1.25, 2 }) |scale| for ([_]f32{ 0, 3.25, 20 }) |radius| for ([_]f32{ 0, 1.3 }) |border| for (0..10) |variant| {
-        const i: gpu.Instance = .{
-            .rect = if (variant == 1) .{ -9.3, -4.7, 112.8, 67.2 } else if (variant == 2) .{ 7.3, 5.7, 4.2, 3.3 } else .{ 7.3, 5.7, 112.8, 67.2 },
-            .color = .{ if (variant == 3) 0.0019607842 else 0.94, 0.12745097, 0.6, if (variant >= 8) 0 else if (variant == 4) 0.6 else 1 },
-            .radius = radius,
-            .border_width = border,
-            .border_color = .{ 0.8, 0.2, 0.1, if (variant == 8) 0 else 0.7 },
-            .clip = .{ 2.4, 3.8, 126.7, 84.9 },
-            .clip_round = if (variant == 5) gpu.clipRound(9, 15) else 0,
-        };
-        const b = bounds(out, &i, scale) orelse continue;
-        const clipped: [4]usize = if (variant == 6) .{ @max(b[0], 36), @max(b[1], 24), @min(b[2], 86), @min(b[3], 51) } else if (variant == 7) .{ b[0], b[1], @min(b[2], b[0] + 1), b[3] } else b;
-        if (clipped[2] <= clipped[0] or clipped[3] <= clipped[1]) continue;
-        for (actual, 0..) |*v, at| v.* = @truncate(at * 37);
-        @memcpy(expected, actual);
-        quad(out, &i, scale, clipped);
-        quadScalar(reference, &i, scale, clipped);
-        try std.testing.expectEqualSlices(u8, expected, actual);
-    };
-}
-
-/// The atlas sampled as Metal's linear filter with clamped edges does.
 /// A BGRA texel of the image atlas, bilinear as Metal's sampler.
 /// Pixels to sample: the image atlas, or a texture's rows.
 const Source = struct {
@@ -397,22 +490,25 @@ fn picture(out: gpu.Pixels, i: *const gpu.Instance, p: Source, scale: f32, b: [4
     const inv = 1 / scale;
     const hw = i.rect[2] * 0.5;
     const hh = i.rect[3] * 0.5;
-    const r = @min(i.radius, @min(hw, hh));
+    const r_abs = @min(@abs(i.radius), @min(hw, hh));
+    const r: f32 = if (i.radius < 0) -r_abs else r_abs;
+    const rot = i.xf[0] != 0;
     for (b[1]..b[3]) |y| {
         const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
-        const ty = (wy - i.rect[1]) / i.rect[3];
-        const v = i.uv[1] + (i.uv[3] - i.uv[1]) * ty;
         const row = y * out.width * 4;
         for (b[0]..b[2]) |x| {
             const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
-            const tx = (wx - i.rect[0]) / i.rect[2];
-            const sd = roundedBox(wx - i.rect[0] - hw, wy - i.rect[1] - hh, hw, hh, r);
+            const up = unrotate(i, wx, wy);
+            if (rot and (up[0] < i.rect[0] or up[1] < i.rect[1] or up[0] > i.rect[0] + i.rect[2] or up[1] > i.rect[1] + i.rect[3])) continue;
+            const tx = (up[0] - i.rect[0]) / i.rect[2];
+            const ty = (up[1] - i.rect[1]) / i.rect[3];
+            const v = i.uv[1] + (i.uv[3] - i.uv[1]) * ty;
+            const sd = cornerSdf(up[0] - i.rect[0] - hw, up[1] - i.rect[1] - hh, hw, hh, r);
             const aa = @max(sd[1] * inv, 0.0001) * 0.5;
             const k = (1 - smoothstep(-aa, aa, sd[0])) * i.color[3] * clipCover(i, wx, wy, inv);
             if (k <= 0) continue;
             const t = samplePicture(p, i.uv[0] + (i.uv[2] - i.uv[0]) * tx, v);
             if (i.border_color[3] > 0) {
-                // Tinted: the shape in one color, as the shader draws it.
                 const a = t[3] * i.border_color[3] * k;
                 blend(out.bytes, row + x * 4, i.border_color[0] * a, i.border_color[1] * a, i.border_color[2] * a, a);
                 continue;
@@ -432,7 +528,7 @@ fn pane(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
     const inv = 1 / scale;
     const hw = i.rect[2] * 0.5;
     const hh = i.rect[3] * 0.5;
-    const r = @min(i.radius, @min(hw, hh));
+    const r = @min(@abs(i.radius), @min(hw, hh));
     for (b[1]..b[3]) |y| {
         const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
         const row = y * out.width * 4;
@@ -447,146 +543,33 @@ fn pane(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
         }
     }
 }
-
-// Shadows as the shader draws them: a box's coverage blurred by a
-// Gaussian, exact along x with erf, sampled four times along y.
-fn gaussian(x: f32, sigma: f32) f32 {
-    return @exp(-(x * x) / (2 * sigma * sigma)) / (@sqrt(2 * std.math.pi) * sigma);
-}
-
-fn erf(x: f32) f32 {
-    const s: f32 = if (x < 0) -1 else 1;
-    const a = @abs(x);
-    var y = 1 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
-    y *= y;
-    return s - s / (y * y);
-}
-
-fn blurAlongX(x: f32, y: f32, sigma: f32, corner: f32, hw: f32, hh: f32) f32 {
-    const delta = @min(hh - corner - @abs(y), 0);
-    const curved = hw - corner + @sqrt(@max(0, corner * corner - delta * delta));
-    const k = @sqrt(@as(f32, 0.5)) / sigma;
-    const lo = 0.5 + 0.5 * erf((x - curved) * k);
-    const hi = 0.5 + 0.5 * erf((x + curved) * k);
-    return hi - lo;
-}
-
-fn shadowAlpha(px: f32, py: f32, hw: f32, hh: f32, corner: f32, sigma: f32) f32 {
-    const low = py - hh;
-    const high = py + hh;
-    const start = std.math.clamp(-3 * sigma, low, high);
-    const end = std.math.clamp(3 * sigma, low, high);
-    const step = (end - start) / 4;
-    var y = start + step * 0.5;
-    var alpha: f32 = 0;
-    for (0..4) |_| {
-        alpha += blurAlongX(px, py - y, sigma, corner, hw, hh) * gaussian(y, sigma) * step;
-        y += step;
-    }
-    return alpha;
-}
-
 fn shadow(out: gpu.Pixels, i: *const gpu.Instance, scale: f32, b: [4]usize) void {
     const hw = i.rect[2] * 0.5;
     const hh = i.rect[3] * 0.5;
     const cx = i.rect[0] + hw;
     const cy = i.rect[1] + hh;
-    const r = @min(i.radius, @min(hw, hh));
+    const r_abs = @min(@abs(i.radius), @min(hw, hh));
+    const r: f32 = if (i.radius < 0) -r_abs else r_abs;
     const sigma = @max(i.border_width, 0.25);
     const c = i.color;
     const inv = 1 / scale;
     for (b[1]..b[3]) |y| {
         const wy = (@as(f32, @floatFromInt(y)) + 0.5) * inv;
-        const py = wy - cy;
         const row = y * out.width * 4;
         for (b[0]..b[2]) |x| {
             const wx = (@as(f32, @floatFromInt(x)) + 0.5) * inv;
-            const pxl = wx - cx;
-            const a = shadowAlpha(pxl, py, hw, hh, r, sigma) * c[3] * clipCover(i, wx, wy, inv);
+            const up = unrotate(i, wx, wy);
+            const pxl = up[0] - cx;
+            const py = up[1] - cy;
+            var a = shapes.shadowAlpha(pxl, py, hw, hh, r, sigma) * c[3] * clipCover(i, wx, wy, inv);
+            // Knocked out: nothing inside the box (`uv` its offset from the shadow's rect).
+            if (i.kind == gpu.Kind.shadow_out) a *= std.math.clamp(cornerSdf(pxl - i.uv[0], py - i.uv[1], hw, hh, r)[0] + 0.5, 0, 1);
+            if (a > 0) a = std.math.clamp(a + shapes.shadowDither(x, y), 0, 1);
             blend(out.bytes, row + x * 4, c[0] * a, c[1] * a, c[2] * a, a);
         }
     }
 }
 
-test "rounded boxes, borders, glyphs and shadows" {
-    const gpa = std.testing.allocator;
-    const bytes = try gpa.alloc(u8, 40 * 40 * 4);
-    defer gpa.free(bytes);
-    const out: gpu.Pixels = .{ .bytes = bytes, .width = 40, .height = 40 };
-    var texels: [4]u8 = .{ 255, 255, 255, 255 };
-    draw(out, &.{
-        .{ .rect = .{ 2, 2, 16, 16 }, .color = .{ 1, 0, 0, 1 }, .radius = 4 },
-        .{ .rect = .{ 0, 0, 10, 10 }, .color = .{ 0, 0, 1, 1 }, .uv = .{ 0, 0, 1, 1 }, .kind = gpu.Kind.text, .clip = .{ 0, 0, 5, 20 } },
-    }, .{ .pixels = &texels, .size = 2 }, .{}, 2, .{ .r = 1, .g = 1, .b = 1 });
-    const at = struct {
-        fn f(o: gpu.Pixels, x: usize, y: usize) [4]u8 {
-            return o.bytes[(y * o.width + x) * 4 ..][0..4].*;
-        }
-    }.f;
-    // The middle of the box is red (BGRA); its rounded corner is not.
-    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, at(out, 20, 20));
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, at(out, 4, 34));
-    // The glyph is blue where its clip lets it be.
-    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, at(out, 2, 2));
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, at(out, 15, 2));
-}
-
-test "a clip's rounded corners cut what it clips, only where asked" {
-    const gpa = std.testing.allocator;
-    const bytes = try gpa.alloc(u8, 40 * 40 * 4);
-    defer gpa.free(bytes);
-    const out: gpu.Pixels = .{ .bytes = bytes, .width = 40, .height = 40 };
-    // A square filling its clip, whose left corners round by 8.
-    draw(out, &.{
-        .{ .rect = .{ 0, 0, 20, 20 }, .color = .{ 1, 0, 0, 1 }, .clip = .{ 0, 0, 20, 20 }, .clip_round = gpu.clipRound(8, 1 | 8) },
-    }, .{ .pixels = &.{}, .size = 0 }, .{}, 2, .{ .r = 1, .g = 1, .b = 1 });
-    const at = struct {
-        fn f(o: gpu.Pixels, x: usize, y: usize) [4]u8 {
-            return o.bytes[(y * o.width + x) * 4 ..][0..4].*;
-        }
-    }.f;
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, at(out, 0, 0));
-    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, at(out, 0, 39));
-    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, at(out, 39, 0));
-    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, at(out, 39, 39));
-    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, at(out, 20, 20));
-    const unpacked = gpu.clipCorners(gpu.clipRound(8, 1 | 8));
-    try std.testing.expectEqual(@as(f32, 8), unpacked.radius);
-    try std.testing.expectEqual(@as(u4, 9), unpacked.corners);
-}
-
-/// A dashed border's coverage at (`x`, `y`) from the box's centre, as
-/// GPUI lays dashes (shader.metal's `dash_cover`); `px` is a pixel's size.
-pub fn dashCover(x: f32, y: f32, hw: f32, hh: f32, r: f32, w: f32, px: f32) f32 {
-    const pi = std.math.pi;
-    const dv = 1 / (3 * w);
-    const sx = (2 * hw - 2 * r) * dv;
-    const sy = (2 * hh - 2 * r) * dv;
-    const cq = r * pi * 0.5 * dv;
-    const qx = @abs(x) - (hw - r);
-    const qy = @abs(y) - (hh - r);
-    const t: f32 = if (r > 0 and qx > 0 and qy > 0) blk: {
-        const vx = x - std.math.sign(x) * (hw - r);
-        const vy = y - std.math.sign(y) * (hh - r);
-        const ang = std.math.atan2(vy, vx);
-        break :blk if (x >= 0 and y < 0)
-            sx + (ang + pi * 0.5) * r * dv
-        else if (x >= 0)
-            sx + cq + sy + ang * r * dv
-        else if (y >= 0)
-            2 * sx + 2 * cq + sy + (ang - pi * 0.5) * r * dv
-        else
-            2 * sx + 3 * cq + 2 * sy + (ang + pi) * r * dv;
-    } else if ((hh - @abs(y)) < (hw - @abs(x)))
-        (if (y < 0) (x + hw - r) * dv else sx + 2 * cq + sy + (hw - r - x) * dv)
-    else
-        (if (x > 0) sx + cq + (y + hh - r) * dv else 2 * sx + 3 * cq + sy + (hh - r - y) * dv);
-    const max_t = 2 * (sx + sy) + 4 * cq;
-    if (max_t < 1) return 1;
-    const period = max_t / @floor(max_t);
-    const len: f32 = 2.0 / 3.0;
-    const u = t + period * 0.5 - len * 0.5;
-    const centered = u - period * @floor(u / period) - period * 0.5;
-    const sd = (@abs(centered) - len * 0.5) / dv;
-    return std.math.clamp(0.5 - sd / px, 0, 1);
+test {
+    _ = @import("raster_fill_check.zig");
 }

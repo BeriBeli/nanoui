@@ -197,6 +197,10 @@ where a box should be, and motion takes it there.
 - **Gestures:** `hover` and `press` are targets too.
 - **Lists:** items can be staggered.
 - **Layout animation:** boxes the layout moves glide to their new place.
+- **Shared elements:** boxes that share a key glide across parents (`share`).
+- **Drag and snap:** a box follows the pointer, then springs to a point.
+- **Scroll-linked values:** a scroller's progress drives another number.
+- **Animated text:** letters or words enter, staggered.
 - **Keyframes:** they loop, or play there and back.
 
 Motion keeps its state in the frame's context, by box, so there are no
@@ -478,12 +482,20 @@ What you need, an app's build.zig, and what isn't there yet:
       <p><a href="https://github.com/justrach/nanofly"><strong>nanofly</strong></a>: flights, live, on a map, for iPhone (and the Mac), after Flighty. It finds a flight's route, follows it from open ADS-B data, and says when it lands by each airport's clock, with the weather there. Its map, drawn by <code>ui.canvas</code>, has the night's side, the weather's radar and the planes around; you can pinch it, and its card is a sheet of Liquid Glass you drag between three heights.</p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://github.com/gstohl/nanomail"><img src="docs/images/nanomail-dark.png" alt="nanomail: a message with links and a picture, shared mailboxes in the sidebar"></a>
+      <p><a href="https://github.com/gstohl/nanomail"><strong>nanomail</strong></a>: a JMAP mail client for macOS and iOS. It shows rich mail with links and pictures, loading pictures from the web only when you ask. New mail arrives by push, and mailboxes others share with you appear with what you may do in them. It signs in with a password, a token, or OAuth in the browser.</p>
+    </td>
+    <td width="50%" valign="top"></td>
+  </tr>
 </table>
 
 Download them for macOS:
 [nanoterm](https://github.com/justrach/nanoterm/releases/latest/download/nanoterm-macos-arm64.dmg) ·
 [nanomon](https://github.com/justrach/nanomon/releases/latest/download/nanomon-macos-arm64.dmg) ·
 [nanostudio](https://github.com/justrach/nanostudio/releases/latest/download/nanostudio-macos-arm64.dmg).
+nanomail builds from source for now (`zig build`; its README has iOS).
 
 They live in `apps/` as submodules, and each also builds on its own, fetching
 nanoui pinned by commit. To build one against the nanoui next to it, with
@@ -513,25 +525,8 @@ Release binaries are about 0.7 MB for nanoui and 11.8 MB for mygo. IPC (5000
 sequential calls from the page to native code) took 493 ms with nanoui and
 528 ms with mygo.
 
-### Build times
-
-A counter app each, from empty build caches, on the same M3 Ultra
-(`sh tools/buildperf.sh` measures it again: mygo's
-`examples/counter-native` with Go 1.27.1, nanoui's from `nui start` with
-Zig 0.17.0; network fetches aren't timed):
-
-| | mygo | nanoui |
-|---|---:|---:|
-| cold build | 4.4 s | 6.3 s (a second app, Zig's global cache warm: 4.8 s) |
-| rebuild, nothing changed | 0.28 s | 0.12 s |
-| rebuild after a one-line edit | 0.55 s | 2.2 s |
-| build cache on disk | 182 MB | 97 MB |
-| program | 14 MB | 4 MB Debug, 0.7 MB ReleaseFast (11 s), 0.4 MB ReleaseSmall (6.7 s) |
-
-Zig compiles the app and nanoui as one unit, so an edit rebuilds the
-whole of it where Go rebuilds one package: that's where mygo is faster.
-Cold builds are close, nothing-changed rebuilds faster, and the disk a
-project costs is about half.
+See [build-time measurements](docs/build-performance.md) for cold builds,
+rebuilds and cache sizes on the same machine.
 
 ## Development
 

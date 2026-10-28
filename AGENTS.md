@@ -9,8 +9,8 @@ X server or VDI desktop. This fork owns its compatibility and performance
 changes locally.
 
 - **Use an upstream stable release as the baseline.** This maintenance
-  branch uses upstream `v0.7.0`
-  (`462acc0e0ba2bbc752e25b44272835120783860c`). Keep downstream changes on
+  branch uses upstream `v0.8.0`
+  (`8e2c690acf363f7fbd0393ef84a6231ecfc12dfb`). Keep downstream changes on
   top of that release; do not merge upstream `main` as routine maintenance.
   When upgrading, select and record a newer stable release, review the
   release-to-release changes, and revalidate the supported target.
@@ -157,7 +157,8 @@ src/ui/glass.zig      Liquid Glass: the material, backdrop and optics (CPU too)
 src/ui/glass.metal    the glass's backdrop kernels and fragment function
 src/ui/metal_glass.zig  panes of glass in the Metal renderer
 src/ui/surface.zig    the NSView: events, display link, occlusion, resize
-src/ui/motion/        ui.motion: springs, tweens, presence, keyframes, layout animation
+src/ui/motion/        ui.motion: springs, tweens, presence, keyframes, layout,
+                      drag/snap, scroll-linked values, shared elements, text
 src/ui/tester.zig     views without a window: input, time, PNG snapshots
 src/ui/tests.zig      widget tests through the Tester
 src/ui/text_tt.zig    text where nanoui shapes it itself (Linux, Windows, Android)
@@ -189,6 +190,7 @@ examples/             hello (webview), counter and gallery (native UI)
 hillclimb/            headless benchmarks against mygo (its own package)
 apps/nanoterm/        the first app: a Warp-like terminal with ACP agents
 apps/nanomon/         a small activity monitor (libproc, Mach, /proc)
+apps/nanomail/        a JMAP mail client for macOS and iOS
 site/                 the website (its own repo): Next.js on Cloudflare Workers, a gallery
 tools/lines.zig       the 600-line check
 tools/version.sh      set or check the version (build.zig.zon) for a release

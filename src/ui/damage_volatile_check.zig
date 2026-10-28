@@ -1,4 +1,4 @@
-//! Regression boundaries where Letty's patches meet nanoui 0.4 rendering.
+//! Persistent CPU backing across volatile textures, filters and grouped drawing.
 const std = @import("std");
 const testing = std.testing;
 const gpu = @import("gpu.zig");
@@ -50,5 +50,42 @@ test "persistent CPU glass redraw matches full backdrop after local changes" {
         try testing.expect(result.damage == .full);
         raster.draw(.{ .bytes = &reference, .width = 64, .height = 48 }, instances, empty_mask, .{}, 1, .black);
         try testing.expectEqualSlices(u8, &reference, surface.bytes);
+    }
+}
+
+test "group opacity updates and removal equal a complete CPU frame" {
+    const a = std.testing.allocator;
+    var cpu: damage.Surface = .{};
+    defer cpu.deinit(a);
+    const frame: damage.Frame = .{ .width = 64, .height = 48, .scale = 1, .clear = .{ 1, 1, 1, 1 } };
+    var scene = [_]gpu.Instance{
+        .{ .rect = .{ 0, 0, 64, 48 }, .color = .{ 1, 1, 1, 1 }, .kind = gpu.Kind.layer_begin },
+        .{ .rect = .{ 8, 6, 32, 24 }, .color = .{ 1, 0, 0, 1 } },
+        .{ .rect = .{ 22, 14, 32, 24 }, .color = .{ 0, 0, 1, 1 } },
+        .{ .rect = .{ 0, 0, 64, 48 }, .color = .{ 1, 1, 1, 0.5 }, .kind = gpu.Kind.layer_end },
+    };
+    const reference = try a.alloc(u8, 64 * 48 * 4);
+    defer a.free(reference);
+    const mask: raster.Mask = .{ .pixels = &.{}, .size = 0 };
+    for (0..3) |step| {
+        scene[2].rect[0] += 3;
+        const stream: []const gpu.Instance = if (step < 2) &scene else scene[1..3];
+        const r = try cpu.render(a, stream, mask, .{}, frame);
+        try std.testing.expect(r.damage == .full);
+        raster.draw(.{ .bytes = reference, .width = 64, .height = 48 }, stream, mask, .{}, 1, .{ .r = 1, .g = 1, .b = 1 });
+        try std.testing.expectEqualSlices(u8, reference, cpu.bytes);
+    }
+}
+
+test "damage rejects nonfinite transform pulse and velocity fields" {
+    const a = std.testing.allocator;
+    var cpu: damage.Surface = .{};
+    defer cpu.deinit(a);
+    const frame: damage.Frame = .{ .width = 64, .height = 48, .scale = 1, .clear = .{ 1, 1, 1, 1 } };
+    inline for (.{ "xf", "pulse", "vel" }) |field| {
+        var i: gpu.Instance = .{ .rect = .{ 8, 6, 32, 24 }, .color = .{ 1, 0, 0, 1 } };
+        @field(i, field)[0] = std.math.nan(f32);
+        try std.testing.expectError(error.InvalidGeometry, cpu.render(a, &.{i}, .{ .pixels = &.{}, .size = 0 }, .{}, frame));
+        try std.testing.expect(!cpu.valid);
     }
 }
