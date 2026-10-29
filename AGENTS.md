@@ -40,6 +40,12 @@ changes locally.
   with self-contained regression tests. Consumers pin the resulting commit;
   do not move these fixes back into an application patch chain or require
   application-exported font I/O symbols.
+- Preserve the stable upstream application API. Do not add Letty-facing
+  interfaces, terminal-specific node kinds, font-source leases, shaping hooks
+  or input metadata for consumers. Letty owns its terminal grid/font policy
+  and native input adapters using existing upstream interfaces. Historical
+  extensions are not a precedent for new APIs; retire them only with the
+  fork's own regression and benchmark coverage preserved.
 - Prioritize X11 forwarding: efficient CPU rendering, retained backing
   pixels, dirty-region presentation, scrolling, fewer allocations, and
   bounded memory and caches. Avoid unnecessary full-window repainting,

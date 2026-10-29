@@ -248,7 +248,7 @@ pub const Surface = struct {
                 }
             },
             w.WM_LBUTTONDOWN, w.WM_LBUTTONDBLCLK, 0x0204, 0x0206, 0x0207, 0x0209 => {
-                self.ctx.input.mouse_button = if (msg == 0x0204 or msg == 0x0206) 2 else if (msg == 0x0207 or msg == 0x0209) 3 else 1;
+                self.ctx.input.button = if (msg == 0x0204 or msg == 0x0206) .right else if (msg == 0x0207 or msg == 0x0209) .middle else .left;
                 _ = w.SetCapture(h);
                 self.setMouse(lp);
                 self.ctx.input.click_count = if (msg == w.WM_LBUTTONDBLCLK or msg == 0x0206 or msg == 0x0209) 2 else 1;
@@ -257,7 +257,7 @@ pub const Surface = struct {
                 self.frame();
             },
             w.WM_LBUTTONUP, 0x0205, 0x0208 => {
-                self.ctx.input.mouse_button = if (msg == 0x0205) 2 else if (msg == 0x0208) 3 else 1;
+                self.ctx.input.button = if (msg == 0x0205) .right else if (msg == 0x0208) .middle else .left;
                 _ = w.ReleaseCapture();
                 self.setMouse(lp);
                 self.ctx.updateHot();
@@ -275,7 +275,6 @@ pub const Surface = struct {
                     self.ctx.updateHot();
                 } else if (self.ctx.wants_wheel) {
                     self.ctx.input.scroll = .{ .y = delta };
-                    self.ctx.input.scroll_lines = notches;
                     self.frame();
                 }
             },

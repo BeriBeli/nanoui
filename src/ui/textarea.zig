@@ -129,7 +129,7 @@ pub fn textArea(c: *Context, buffer: *tf.TextBuffer, opts: AreaOptions) tf.Resul
             const lines = linesOf(c, buffer.text(), style, w);
             const x = c.input.mouse.x - r.x - pad.left;
             const row: usize = @intFromFloat(@max(0, (c.input.mouse.y - r.y - pad.top + e.scroll_y) / lh));
-            if (c.input.pressed and c.input.mouse_button == 1 and !c.input.ctrl and it.hovered) {
+            if (c.input.pressed and c.input.button == .left and !c.input.ctrl and it.hovered) {
                 const at = indexOn(c, buffer.text(), style, lines, row, x);
                 textedit.pointerSelect(c, e, buffer.text(), at, true);
             } else if (e.selecting and c.input.down) {

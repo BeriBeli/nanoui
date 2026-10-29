@@ -50,7 +50,7 @@ pub const Tester = struct {
     dt: f32 = 1.0 / 60.0,
     /// What copy and cut wrote: tests never touch the system's clipboard.
     clipboard: std.ArrayList(u8) = .empty,
-    pointer_buttons: @import("input.zig").Buttons = .{},
+    pointer_buttons: @import("pointer_input.zig").Buttons = .{},
     /// The simulated clock, advanced by `dt` each frame.
     time: f64 = 0,
 
@@ -123,10 +123,10 @@ pub const Tester = struct {
         t.click(x, y);
         t.moveTo(x, y);
         t.ctx.input.click_count = 2;
-        t.pointer_buttons.press(@fromBackingInt(@intCast(t.ctx.input.mouse_button)));
+        t.pointer_buttons.press(t.ctx.input.button);
         t.ctx.pointerDown();
         t.frame();
-        if (t.pointer_buttons.release(@fromBackingInt(@intCast(t.ctx.input.mouse_button)))) {
+        if (t.pointer_buttons.release(t.ctx.input.button)) {
             t.ctx.pointerUp();
             t.frame();
         }
@@ -136,10 +136,10 @@ pub const Tester = struct {
     pub fn click(t: *Tester, x: f32, y: f32) void {
         t.moveTo(x, y);
         t.ctx.input.click_count = 1;
-        t.pointer_buttons.press(@fromBackingInt(@intCast(t.ctx.input.mouse_button)));
+        t.pointer_buttons.press(t.ctx.input.button);
         t.ctx.pointerDown();
         t.frame();
-        if (t.pointer_buttons.release(@fromBackingInt(@intCast(t.ctx.input.mouse_button)))) {
+        if (t.pointer_buttons.release(t.ctx.input.button)) {
             t.ctx.pointerUp();
             t.frame();
         }
@@ -154,7 +154,7 @@ pub const Tester = struct {
 
     pub fn drag(t: *Tester, x1: f32, y1: f32, x2: f32, y2: f32) void {
         t.moveTo(x1, y1);
-        t.pointer_buttons.press(@fromBackingInt(@intCast(t.ctx.input.mouse_button)));
+        t.pointer_buttons.press(t.ctx.input.button);
         t.ctx.pointerDown();
         t.frame();
         var i: f32 = 1;
@@ -162,7 +162,7 @@ pub const Tester = struct {
             t.ctx.input.mouse = .{ .x = x1 + (x2 - x1) * i / 8, .y = y1 + (y2 - y1) * i / 8 };
             t.frame();
         }
-        if (t.pointer_buttons.release(@fromBackingInt(@intCast(t.ctx.input.mouse_button)))) {
+        if (t.pointer_buttons.release(t.ctx.input.button)) {
             t.ctx.pointerUp();
             t.frame();
         }
@@ -216,9 +216,9 @@ pub const Tester = struct {
     }
 
     fn clickWith(t: *Tester, button: @import("input.zig").Button, x: f32, y: f32) void {
-        t.ctx.input.mouse_button = @backingInt(button);
+        t.ctx.input.button = button;
         t.click(x, y);
-        t.ctx.input.mouse_button = 1;
+        t.ctx.input.button = .left;
     }
 
     /// The modifier keys change alone, as a window's `flagsChanged:`.
@@ -261,26 +261,9 @@ pub const Tester = struct {
     pub fn findText(t: *Tester, s: []const u8) ?types.Rect {
         for (t.ctx.nodes.items) |n| switch (n.content) {
             .text => |tx| if (std.mem.eql(u8, tx.str, s)) return n.rect,
-            .glyph_run => |tx| if (std.mem.eql(u8, tx.str, s)) return n.rect,
             .icon, .image, .texture, .canvas, .none => {},
         };
         return null;
-    }
-
-    /// The VT grid cell containing the first matching byte sequence. This
-    /// remains independent of ligature glyph count, kerning and font advances.
-    pub fn findGridCell(t: *Tester, s: []const u8) ?types.Rect {
-        if (s.len == 0) return null;
-        for (t.ctx.nodes.items) |n| if (n.content == .glyph_run) {
-            const run = n.content.glyph_run;
-            const at = std.mem.indexOf(u8, run.str, s) orelse continue;
-            const index = @import("grid_text.zig").owner(run.cells, @intCast(at)) catch continue;
-            const last = run.cells[run.cells.len - 1];
-            const cw = n.rect.w / @as(f32, @floatFromInt(last.col + last.width));
-            const cell = run.cells[index];
-            return .{ .x = n.rect.x + @as(f32, @floatFromInt(cell.col)) * cw, .y = n.rect.y, .w = @as(f32, @floatFromInt(cell.width)) * cw, .h = n.rect.h };
-        };
-        return t.findText(s);
     }
 
     pub fn hasText(t: *Tester, s: []const u8) bool {
@@ -291,7 +274,6 @@ pub const Tester = struct {
     pub fn containsText(t: *Tester, s: []const u8) bool {
         for (t.ctx.nodes.items) |n| switch (n.content) {
             .text => |tx| if (std.mem.indexOf(u8, tx.str, s) != null) return true,
-            .glyph_run => |tx| if (std.mem.indexOf(u8, tx.str, s) != null) return true,
             .icon, .image, .texture, .canvas, .none => {},
         };
         return false;

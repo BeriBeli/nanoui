@@ -119,7 +119,7 @@ fn press(obj: objc.Object, event: objc.Object, button: input.Button) void {
     s.ctx.updateHot();
     s.ctx.input.click_count = @intCast(std.math.clamp(objc.msg(objc.NSInteger, event, "clickCount", .{}), 0, 255));
     const eff_button: input.Button = if (button == .left and s.ctx.input.ctrl) .right else button;
-    s.ctx.input.mouse_button = @backingInt(eff_button);
+    s.ctx.input.button = eff_button;
     if (eff_button == .left) {
         // Under a hidden title bar, the top strip moves the window as a title bar would.
         if (s.window.title_bar == .hidden and s.ctx.input.mouse.y < s.ctx.title_bar_height and s.ctx.hot == 0) {
@@ -150,7 +150,7 @@ fn release(obj: objc.Object, event: objc.Object, button: input.Button) void {
     // Context menus end UI gestures before the physical button is released.
     if (!s.pointer_buttons.release(button)) return;
     setMouse(s, event);
-    s.ctx.input.mouse_button = @backingInt(button);
+    s.ctx.input.button = button;
     s.ctx.updateHot();
     s.ctx.pointerUp();
     s.frame();
@@ -244,8 +244,8 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     const phase = scrollPhase(event);
     if (!s.visible() or in.scroll_phase == .none or in.scroll_phase == .changed or phase == .began or phase == .ended) in.scroll_phase = phase;
     s.ctx.scroll_holding = in.precise and (phase == .began or phase == .changed);
-    const lines = input.macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaY", .{})), in.precise);
-    var dx = input.macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaX", .{})), in.precise);
+    const lines = @import("pointer_input.zig").macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaY", .{})), in.precise);
+    var dx = @import("pointer_input.zig").macosScrollDelta(@floatCast(objc.msg(f64, event, "scrollingDeltaX", .{})), in.precise);
     var dy = lines;
     if (!in.precise) {
         dx *= 12;
@@ -253,8 +253,6 @@ fn scrollWheel(obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) v
     }
     if (s.ctx.wants_wheel) {
         in.scroll = .{ .x = dx, .y = dy };
-        in.scroll_lines = if (in.precise) null else lines;
-        in.scroll_started = phase == .began;
         s.frame();
         return;
     }

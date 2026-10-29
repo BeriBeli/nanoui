@@ -192,11 +192,11 @@ test "raw secondary button edges preserve field focus and never activate a widge
     t.settle(1);
     const focus = t.ctx.focus;
     const open = t.findText("Open").?;
-    for ([_]u8{ 2, 3 }) |button| {
+    for ([_]@import("input.zig").Button{ .right, .middle }) |button| {
         for ([_]ui.Point{ .{ .x = open.x + open.w / 2, .y = open.y + open.h / 2 }, .{ .x = 400, .y = 190 } }) |point| {
             t.moveTo(point.x, point.y);
-            t.ctx.input.mouse_button = button;
-            if (button == 2) t.ctx.secondaryDown();
+            t.ctx.input.button = button;
+            if (button == .right) t.ctx.secondaryDown();
             t.ctx.pointerDown();
             try testing.expect(t.ctx.input.pressed and t.ctx.input.down);
             t.frame();

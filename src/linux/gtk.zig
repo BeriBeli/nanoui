@@ -80,8 +80,6 @@ pub const Api = struct {
 /// GTK 3's own: its main loop, window placement, events as structs, the
 /// clipboard and dialogs that wait.
 pub const Api3 = struct {
-    gtk_widget_get_screen: *const fn (w: *Widget) callconv(.c) *anyopaque,
-    gdk_screen_get_resolution: *const fn (screen: *anyopaque) callconv(.c) f64,
     gtk_init_check: *const fn (argc: ?*c_int, argv: ?*anyopaque) callconv(.c) c_int,
     gtk_main: *const fn () callconv(.c) void,
     gtk_main_quit: *const fn () callconv(.c) void,

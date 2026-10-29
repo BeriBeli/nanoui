@@ -76,7 +76,7 @@ const Window = struct { app: *App };
 const Context = struct {
     input: ui.Input = .{},
     shortcut_taken: bool = false,
-    focused_text: ?struct { id: u64, editable: bool = true } = null,
+    focused_text: ?struct { id: u64 } = null,
 };
 const Fixture = struct {
     gpa: std.mem.Allocator = std.testing.allocator,
@@ -331,21 +331,6 @@ test "GTK delayed modified commits are text rather than replayed shortcuts" {
     H.commit(&s, ",");
     try std.testing.expectEqualStrings(",", s.out.items);
     try std.testing.expect(s.last_shortcut == null);
-}
-
-test "GTK terminal shortcuts do not depend on the stable pane ID bits" {
-    for ([_]u64{ 1, (@as(u64, 1) << 63) | 1 }) |id| {
-        var s: Fixture = .{};
-        s.init();
-        defer s.deinit();
-        s.ctx.focused_text = .{ .id = id, .editable = false };
-        for ("cavx") |key| {
-            var event: Event = .{ .code = key, .state = gtk.control_mask };
-            _ = H.press(&s, event.native());
-            try std.testing.expectEqual(@as(u21, key), s.last_shortcut.?.key);
-        }
-        try std.testing.expectEqualStrings("^^^^", s.out.items);
-    }
 }
 
 test "GTK preedit character positions become UTF-8 byte boundaries" {

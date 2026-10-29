@@ -160,14 +160,14 @@ test "right_clicked fires on right press and Ctrl+left press and clears down" {
     defer t.deinit();
     // Right press alone (before release) triggers right_clicked and clears down.
     t.moveTo(70, 40);
-    t.ctx.input.mouse_button = 2;
+    t.ctx.input.button = .right;
     t.ctx.pointerDown();
     t.frame();
     try testing.expectEqual(@as(u32, 1), s.right);
     try testing.expect(!t.ctx.input.down);
     try testing.expectEqual(@as(u64, 0), t.ctx.active);
     // Ctrl+left press triggers right_clicked, not left click or pressed.
-    t.ctx.input.mouse_button = 1;
+    t.ctx.input.button = .left;
     t.ctx.input.ctrl = true;
     t.ctx.pointerDown();
     t.frame();
@@ -231,7 +231,7 @@ test "raw right and middle releases survive context menu gesture completion" {
         edges: [3][2]u32 = @splat(.{ 0, 0 }),
         clicks: u32 = 0,
         fn build(self: *@This(), c: *ui.Context) void {
-            const index = c.input.mouse_button - 1;
+            const index = @backingInt(c.input.button);
             if (c.input.pressed) self.edges[index][0] += 1;
             if (c.input.released) self.edges[index][1] += 1;
             ui.column(c, .{});

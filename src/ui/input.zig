@@ -41,8 +41,8 @@ pub const Shortcut = struct {
             const eq = std.ascii.eqlIgnoreCase;
             if (eq(p, "cmd")) s.cmd = true else if (eq(p, "ctrl")) s.ctrl = true else if (eq(p, "alt") or eq(p, "opt")) s.alt = true else if (eq(p, "shift")) s.shift = true else {
                 const named = [_]struct { []const u8, u21 }{
-                    .{ "enter", enter }, .{ "return", enter }, .{ "escape", escape },  .{ "esc", escape },
-                    .{ "tab", tab },     .{ "up", up },        .{ "down", down },      .{ "left", left },
+                    .{ "enter", enter }, .{ "return", enter }, .{ "escape", escape }, .{ "esc", escape },
+                    .{ "tab", tab },     .{ "up", up },        .{ "down", down },     .{ "left", left },
                     .{ "right", right }, .{ "space", ' ' },    .{ "backspace", 0x7f }, .{ "delete", 0x7f },
                     .{ "plus", '+' },
                 };
@@ -117,8 +117,6 @@ pub const Command = enum {
 /// The focused text field as the last frame left it, for the input
 /// method's questions between frames. Offsets are bytes.
 pub const FocusedText = struct {
-    /// False for a terminal input client that owns its editing shortcuts.
-    editable: bool = true,
     id: u64,
     text: []const u8,
     caret: usize,
@@ -184,24 +182,7 @@ pub const KeyState = struct {
 
 /// The pointer button of a press: clicks, presses and double clicks are
 /// the left one's; `right_clicked` and `middle_clicked` the others'.
-pub const Button = enum(u8) { left = 1, right = 2, middle = 3 };
-
-/// Physical presses outlive a UI gesture (a context menu clears Input.down).
-/// Backends must still deliver each owned release once to raw input consumers.
-pub const Buttons = struct {
-    pressed: [3]bool = @splat(false),
-
-    pub fn press(self: *Buttons, button: Button) void {
-        self.pressed[@backingInt(button) - 1] = true;
-    }
-
-    pub fn release(self: *Buttons, button: Button) bool {
-        const down = &self.pressed[@backingInt(button) - 1];
-        if (!down.*) return false;
-        down.* = false;
-        return true;
-    }
-};
+pub const Button = enum { left, right, middle };
 
 /// Where a scroll gesture is: a trackpad's fingers, then its momentum.
 pub const ScrollPhase = enum { none, began, changed, ended, momentum };
@@ -219,13 +200,13 @@ pub const Input = struct {
     /// The button went down / up in this event.
     pressed: bool = false,
     released: bool = false,
+    /// Which button the last press was.
+    button: Button = .left,
     /// The secondary button went down in this event: the right one, or a
     /// Control-click on the Mac. It isn't a press (`pressed` stays false):
     /// it asks for a box's context menu (`Div.secondaryClicked`).
     secondary: bool = false,
     click_count: u32 = 0,
-    mouse_button: u8 = 1,
-    /// Scroll delta in logical pixels: positive moves toward top/left.
     scroll: types.Point = .{},
     scroll_phase: ScrollPhase = .none,
     /// The wheel's deltas are a trackpad's points, not a mouse's lines.
@@ -243,10 +224,6 @@ pub const Input = struct {
     zoom: f32 = 1,
     /// How far two fingers moved together in this event.
     pan: types.Point = .{},
-    /// Native vertical line delta for discrete wheels; null for precise input.
-    scroll_lines: ?f32 = null,
-    /// A new native gesture must not inherit a previous fractional row.
-    scroll_started: bool = false,
     key: ?Key = null,
     /// Text typed or pasted in this event.
     chars: []const u8 = "",
@@ -277,43 +254,9 @@ pub const Input = struct {
         i.a11y_step = null;
         i.zoom = 1;
         i.pan = .{};
-        i.scroll_lines = null;
-        i.scroll_started = false;
         i.key = null;
         i.chars = "";
         i.ops = &.{};
         i.shortcut = null;
     }
 };
-
-/// Input's button contract is 1 left, 2 right, 3 middle on every backend.
-pub fn gtkButton(button: u32) u8 {
-    return switch (button) {
-        1 => 1,
-        2 => 3,
-        3 => 2,
-        else => 0,
-    };
-}
-test "GTK mouse buttons normalize to the shared right/middle contract" {
-    try std.testing.expectEqual(@as(u8, 2), gtkButton(3));
-    try std.testing.expectEqual(@as(u8, 3), gtkButton(2));
-    try std.testing.expectEqual(@as(u8, 0), gtkButton(9));
-}
-
-/// AppKit can report a slow discrete wheel detent as 0.1. Keep each
-/// nonzero detent responsive while retaining OS acceleration above one.
-/// Precise devices must keep their fractional logical-pixel displacement.
-pub fn macosScrollDelta(delta: f32, precise: bool) f32 {
-    if (!std.math.isFinite(delta)) return 0;
-    if (precise or delta == 0) return delta;
-    return if (delta > 0) @max(1, delta) else @min(-1, delta);
-}
-test "AppKit discrete detents have a minimum step without amplifying precise input" {
-    try std.testing.expectEqual(@as(f32, 1), macosScrollDelta(0.1, false));
-    try std.testing.expectEqual(@as(f32, -1), macosScrollDelta(-0.1, false));
-    try std.testing.expectEqual(@as(f32, 2.5), macosScrollDelta(2.5, false));
-    try std.testing.expectEqual(@as(f32, 0), macosScrollDelta(0, false));
-    try std.testing.expectEqual(@as(f32, 0.1), macosScrollDelta(0.1, true));
-    try std.testing.expectEqual(@as(f32, -0.1), macosScrollDelta(-0.1, true));
-}

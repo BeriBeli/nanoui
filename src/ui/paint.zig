@@ -141,7 +141,6 @@ fn paintNode(c: *Context, out: *std.ArrayList(metal.Instance), index: u32, clip:
         });
         switch (n.content) {
             .text => |*t| paintText(c, out, index, &n, t, clip4, opacity, selectable, moving),
-            .glyph_run => |run| paintGlyphRun(c, out, r, run, clip4, opacity),
             .icon => |ic| if (c.text.atlas.symbol(ic.name, ic.size, @backingInt(ic.weight))) |sp| {
                 // Centered in its box, which may be larger (a fixed frame).
                 const inner = r.inset(st.padding);
@@ -251,25 +250,6 @@ fn glyphUV(uv_in: [4]f32, color: [4]f32) [4]f32 {
         uv[2] += du;
     }
     return uv;
-}
-
-fn paintGlyphRun(c: *Context, out: *std.ArrayList(metal.Instance), r: types.Rect, run: ctx_mod.Content.GlyphRun, clip4: [4]f32, opacity: f32) void {
-    const color = metal.color4(run.color.alpha(opacity));
-    const baseline = snap(r.y + run.baseline, c.scale);
-    for (run.glyphs) |glyph| {
-        const pen = (r.x + glyph.x) * c.scale;
-        if (pen / c.scale > clip4[2]) continue;
-        const px = @floor(pen);
-        const bin: u8 = @intFromFloat(@min(text_mod.subpixel_bins - 1, @floor((pen - px) * text_mod.subpixel_bins)));
-        const sp = c.text.glyph(glyph, bin, @TypeOf(c.text.*).dilationFor(run.color.r, run.color.g, run.color.b)) orelse continue;
-        push(c, out, .{
-            .rect = .{ px / c.scale + sp.x, baseline - glyph.y + sp.y, sp.w, sp.h },
-            .color = color,
-            .uv = glyphUV(sp.uv, color),
-            .kind = metal.Kind.text,
-            .clip = clip4,
-        });
-    }
 }
 
 /// Maps instances around the anchor of `box` (fractions of it) by `s`,

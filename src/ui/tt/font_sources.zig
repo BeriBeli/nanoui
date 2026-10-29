@@ -1,5 +1,5 @@
 //! Immutable content-addressed font snapshots, confined to the UI thread.
-//! Leases outlive individual Db allocators. The last release returns all bytes;
+//! Snapshots are shared by independent Db allocators. The last release returns all bytes;
 //! there is no idle cache, path-based staleness, or file I/O on retain/release.
 const std = @import("std");
 const gpa = std.heap.page_allocator;
@@ -33,14 +33,6 @@ pub fn internOwned(data: []u8) !*Source {
     live_bytes += data.len;
     return source;
 }
-/// External consumers may borrow only while holding this additional lease.
-/// A source not backed by this pool must use its own copying constructor.
-pub fn retain(data: []const u8, digest: [32]u8) ?*Source {
-    const source = entries.get(digest) orelse return null;
-    if (source.refs == std.math.maxInt(usize) or source.bytes.ptr != data.ptr or source.bytes.len != data.len) return null;
-    source.refs += 1;
-    return source;
-}
 pub fn release(source: *Source) void {
     std.debug.assert(source.refs > 0);
     source.refs -= 1;
@@ -55,23 +47,20 @@ pub fn release(source: *Source) void {
         entries = .empty;
     }
 }
-test "equal font snapshots share across owners and leases survive owner release" {
+test "equal font snapshots survive independent database owner release" {
     const one = try internOwned(try gpa.dupe(u8, "immutable font"));
     const two = try internOwned(try gpa.dupe(u8, "immutable font"));
     try std.testing.expect(one == two);
     try std.testing.expectEqual(@as(usize, 14), bytes());
-    const lease = retain(one.bytes, one.digest).?;
     release(one);
+    try std.testing.expectEqualStrings("immutable font", two.bytes);
     release(two);
-    try std.testing.expectEqualStrings("immutable font", lease.bytes);
-    release(lease);
     try std.testing.expectEqual(@as(usize, 0), bytes());
 }
 test "changed content cannot alias a previously published font snapshot" {
     const old = try internOwned(try gpa.dupe(u8, "old font"));
     const new = try internOwned(try gpa.dupe(u8, "new font"));
     try std.testing.expect(old != new);
-    try std.testing.expect(retain("old font", old.digest) == null);
     release(old);
     try std.testing.expectEqualStrings("new font", new.bytes);
     release(new);

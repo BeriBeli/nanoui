@@ -7,11 +7,17 @@ it does not replay nanoui patches or supply framework font I/O symbols.
 
 ## Owned implementation
 
-The five former Letty patch groups are committed as framework source:
-bounded font discovery/cluster fallback, immutable source leases, grid shaping,
-frame arena recovery, native pointer/scroll/modifier input, glyph-atlas lifetime,
-GTK 3 CPU/X11 surfaces and owned IME queues, bounded backing/damage tracking,
-opaque fills, and native image-sink initialization/migration.
+The fork retains internal compatibility fixes: bounded font discovery and
+fallback, shared immutable font snapshots, frame arena recovery, native input
+correctness, glyph-atlas lifetime, GTK 3 CPU/X11 surfaces and owned IME queues,
+bounded backing/damage tracking, opaque fills, and image-sink migration.
+
+Application interfaces follow upstream v0.8.0. Historical terminal grid nodes,
+run-shaper hooks, font-source leases, custom feature/fallback settings, Light
+weight extensions, input metadata and the atlas inspection hook have been
+removed. Letty owns terminal shaping, font policy and native input adapters.
+Private regression fixtures inspect internal resources without exporting hooks
+from `nanoui.ui` or `TextSystem`.
 
 The libc font adapter is implemented in Zig (`src/ui/tt/file_io.zig`) and
 uses the versioned x86_64 glibc fstat ABI on the supported delivery target.
@@ -24,19 +30,17 @@ CPU backing used by the supported GTK 3 path. Snapshot and workload tests run
 offscreen. Its Linux package includes source hashes and an ELF ABI audit.
 Old benchmark reports continue to certify only their recorded implementations.
 
-The v0.8.0 merge retains the fork's image-sink binding, color-font masks,
-font-feature cache keys, raw pointer buttons and terminal wheel metadata.
-Native secondary clicks also reach upstream context menus without activating
-primary widgets. macOS built-in scroll views use upstream display pacing;
-product wheel consumers keep their discrete steps, horizontal delta and phase.
+Native secondary clicks reach upstream context menus without activating primary
+widgets. Physical releases remain independent of UI gesture completion; private
+backend helpers normalize native buttons to upstream `Input.button` enum tags.
+Built-in scroll views retain display pacing and responsive discrete wheel steps.
 
 The release adds text areas and focus traversal, drag/drop and accessibility,
 macOS display-link pacing, text effects, motion helpers and CPU/OpenGL shadow
 parity. The 144-byte draw instance includes transforms, pulse and velocity;
 damage comparison validates all fields and encloses rotated/knockout shadows.
 Grouped opacity redraws fully because its offscreen composition spans children.
-The fork retains its numeric mouse contract (1 left, 2 right, 3 middle), maps
-upstream Tester button helpers to it, and suppresses primary UI gestures on raw
+The fork uses upstream's button enum and suppresses primary UI gestures on
 secondary presses. Color-glyph masks and failure-aware atlas replacement also
 remain active alongside the release's dark-on-light glyph masks.
 

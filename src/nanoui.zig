@@ -172,5 +172,4 @@ test {
 
 test {
     _ = @import("linux/frame_schedule.zig");
-    _ = @import("linux/typography.zig");
 }

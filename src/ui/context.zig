@@ -107,8 +107,6 @@ pub const Context = struct {
     /// What draws the frames: Metal, OpenGL (Linux, where there is a GPU),
     /// or nanoui's own CPU renderer.
     renderer: []const u8 = if (@import("text.zig").portable) "CPU" else "Metal",
-    /// Font points to logical UI units; macOS uses points directly.
-    points_to_logical: f32 = 1,
     /// Seconds since the previous frame, for animations.
     dt: f32 = 1.0 / 60.0,
     /// Seconds since the first frame: the clock of animations a view drives itself.
@@ -540,8 +538,8 @@ pub const Context = struct {
     pub fn pointerDown(c: *Context) void {
         c.input.down = true;
         c.input.pressed = true;
-        c.right_press = c.input.mouse_button == 2 or (c.input.mouse_button == 1 and c.input.ctrl);
-        if (c.input.mouse_button != 1) return;
+        c.right_press = c.input.button == .right or (c.input.button == .left and c.input.ctrl);
+        if (c.input.button != .left) return;
         if (scroll_mod.tryPressScrollbar(c)) {
             c.input.pressed = false;
             return;

@@ -222,7 +222,7 @@ pub fn Handler(comptime Backend: type) type {
             if (base != 0 and (ctrl or alt or (special != null and (base == ui.Shortcut.up or base == ui.Shortcut.down or base == ui.Shortcut.tab or base == ui.Shortcut.escape)))) {
                 const sc: ui.Shortcut = .{ .key = base, .ctrl = ctrl, .alt = alt, .shift = in.shift };
                 if (s.window.app.accelerator(sc)) return;
-                if (ctrl and s.ctx.focused_text != null and s.ctx.focused_text.?.editable and editShortcut(s, base)) return;
+                if (ctrl and s.ctx.focused_text != null and editShortcut(s, base)) return;
                 s.ctx.shortcut_taken = false;
                 in.shortcut = sc;
                 s.frame();

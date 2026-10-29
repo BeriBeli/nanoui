@@ -19,20 +19,17 @@ pub const Limits = struct {
     pub const collection_faces = 256;
     pub const scan_files = 8192;
     pub const directory_entries = 32768;
-    pub const fallback_names = 32;
     pub const family_bytes = 256;
     pub const path_bytes = 4096;
     pub const arbitrary_probes = 48;
 };
-pub const Limit = enum { source_bytes, loaded_bytes, loaded_faces, faces, collection_faces, scan_files, directory_entries, fallback_names, family_bytes, path_bytes, lookup_entries, cluster_bytes };
-pub const Source = struct { bytes: []const u8, index: u32, digest: [32]u8 };
+pub const Limit = enum { source_bytes, loaded_bytes, loaded_faces, faces, collection_faces, scan_files, directory_entries, family_bytes, path_bytes, lookup_entries, cluster_bytes };
 pub const Stats = struct {
     faces: usize = 0,
     scanned_files: usize = 0,
     loaded_faces: usize = 0,
     loaded_bytes: usize = 0,
     lookup_entries: usize = 0,
-    fallback_names: usize = 0,
     generation: u64 = 1,
     limit_hits: u64 = 0,
     cache_resets: u64 = 0,
@@ -82,7 +79,6 @@ pub const Db = struct {
     scanned: bool = false,
     /// Keys own the entire small cluster, primary, weight, italic and generation.
     found: std.AutoHashMapUnmanaged(cluster.Key, cluster.Result) = .empty,
-    fallback_names: []const []const u8 = &.{},
     generation: u64 = 1,
     metrics: Stats = .{},
     bundled: usize = 0,
@@ -101,8 +97,6 @@ pub const Db = struct {
         }
         db.loaded.deinit(db.gpa);
         db.found.deinit(db.gpa);
-        for (db.fallback_names) |name| db.gpa.free(name);
-        if (db.fallback_names.len != 0) db.gpa.free(db.fallback_names);
     }
 
     pub fn stats(db: *const Db) Stats {
@@ -110,14 +104,9 @@ pub const Db = struct {
         result.faces = db.faces.items.len;
         result.loaded_faces = db.loaded.count();
         result.lookup_entries = db.found.count();
-        result.fallback_names = db.fallback_names.len;
         result.generation = db.generation;
         return result;
     }
-    pub fn sharedSourceBytes(_: *const Db) usize {
-        return sources.bytes();
-    }
-
     fn limit(db: *Db, value: Limit) void {
         db.metrics.last_limit = value;
         db.metrics.limit_hits +|= 1;
@@ -127,41 +116,6 @@ pub const Db = struct {
     fn clearLookup(db: *Db) void {
         db.found.clearRetainingCapacity();
         db.metrics.cache_resets +|= 1;
-    }
-
-    /// Transactional owned copies. Content-equal updates do not allocate or
-    /// invalidate caches; allocation/validation failure preserves the old list.
-    pub fn setFallbacks(db: *Db, names: []const []const u8) !bool {
-        if (names.len > Limits.fallback_names) {
-            db.limit(.fallback_names);
-            return error.TooManyFallbacks;
-        }
-        var same = names.len == db.fallback_names.len;
-        for (names, 0..) |name, i| {
-            if (name.len == 0 or name.len > Limits.family_bytes or std.mem.indexOfScalar(u8, name, 0) != null or !std.unicode.utf8ValidateSlice(name)) {
-                db.limit(.family_bytes);
-                return error.InvalidFallbackFamily;
-            }
-            if (same and !std.mem.eql(u8, name, db.fallback_names[i])) same = false;
-        }
-        if (same) return false;
-        if (db.generation == std.math.maxInt(u64)) return error.GenerationExhausted;
-        const owned = try db.gpa.alloc([]const u8, names.len);
-        var initialized: usize = 0;
-        errdefer {
-            for (owned[0..initialized]) |name| db.gpa.free(name);
-            db.gpa.free(owned);
-        }
-        for (names, 0..) |name, i| {
-            owned[i] = try db.gpa.dupe(u8, name);
-            initialized += 1;
-        }
-        for (db.fallback_names) |name| db.gpa.free(name);
-        if (db.fallback_names.len != 0) db.gpa.free(db.fallback_names);
-        db.fallback_names = owned;
-        db.generation += 1;
-        db.clearLookup();
-        return true;
     }
 
     /// Adds the faces of fonts the app registered since last asked.
@@ -457,14 +411,6 @@ pub const Db = struct {
         return &l.font;
     }
 
-    /// Borrowed until Db.deinit, identical to load(face).data; no second file
-    /// read and no font substitution between shaping and outline rasterization.
-    pub fn source(db: *Db, face: u32) ?Source {
-        _ = db.load(face) orelse return null;
-        const loaded = db.loaded.get(face).?;
-        return .{ .bytes = loaded.data, .index = db.faces.items[face].index, .digest = loaded.digest };
-    }
-
     /// A face that has `cp`, for text its font lacks.
     pub fn fallback(db: *Db, cp: u21, weight: u16) ?u32 {
         var text: [4]u8 = undefined;
@@ -473,12 +419,6 @@ pub const Db = struct {
             return null;
         };
         return db.choose(null, text[0..len], weight, false);
-    }
-
-    /// text is exactly one VT-owned grapheme, never a paragraph. The caller
-    /// keeps VT cell width; this method only selects one face for the full text.
-    pub fn clusterFace(db: *Db, primary: u32, text: []const u8, weight: u16, italic: bool) ?u32 {
-        return db.choose(primary, text, weight, italic);
     }
 
     fn choose(db: *Db, primary: ?u32, text: []const u8, weight: u16, italic: bool) ?u32 {
@@ -525,7 +465,7 @@ pub const Db = struct {
         if (!covered and !was_loaded) {
             // This new candidate has only reached this private synchronous
             // coverage check. It has never reached TextSystem/runFont/atlas or
-            // a public source() caller. Existing published fonts are NEVER
+            // a rendering caller. Existing published fonts are NEVER
             // removed, including when their coverage check fails here.
             const entry = db.loaded.fetchRemove(face).?;
             const candidate = entry.value;
@@ -545,7 +485,6 @@ pub const Db = struct {
 
     fn findCluster(db: *Db, primary: ?u32, text: []const u8, weight: u16, italic: bool) ?u32 {
         if (primary) |face| if (db.covers(face, text)) return face;
-        for (db.fallback_names) |name| if (db.family(name, weight, italic)) |face| if (db.covers(face, text)) return face;
         for (fallbacks) |name| if (db.family(name, weight, italic)) |face| if (db.covers(face, text)) return face;
         // Already loaded faces cost no additional source memory. Pick the best
         // matching style deterministically, not hash-table iteration order.
@@ -580,3 +519,7 @@ pub const Db = struct {
         return null;
     }
 };
+
+test {
+    _ = @import("cluster_fallback_check.zig").Suite(Db.choose);
+}

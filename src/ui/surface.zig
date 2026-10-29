@@ -37,7 +37,7 @@ pub const Surface = struct {
     view: ui.View,
     instances: std.ArrayList(metal.Instance) = .empty,
     pasted: std.ArrayList(u8) = .empty,
-    pointer_buttons: @import("input.zig").Buttons = .{},
+    pointer_buttons: @import("pointer_input.zig").Buttons = .{},
     text_queue: textinput.Queue,
     size: types.Size = .{},
     scale: f32 = 2,
@@ -246,10 +246,6 @@ pub const Surface = struct {
 
     /// The atlas texture the renderer samples: CoreText's, or the one
     /// nanoui's own text rasterized into memory, uploaded when it changed.
-    /// Borrowed current glyph texture, resolving a pending portable upload.
-    /// Offscreen checks use the same path as the window presenter.
-    pub const glyphAtlasTexture = atlasTexture;
-
     fn atlasTexture(self: *Surface) !objc.Object {
         if (!text.portable) return self.text.texture();
         const a = &self.text.atlas;

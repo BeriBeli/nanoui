@@ -39,7 +39,6 @@ pub const Font = struct {
     ascent: f32,
     descent: f32,
     leading: f32,
-    features_applied: bool = true,
 
     pub fn lineHeight(f: Font) f32 {
         return @ceil(f.ascent + f.descent + f.leading);
@@ -56,10 +55,10 @@ pub const Layout = struct { width: f32, glyphs: []const Glyph };
 /// A line of wrapped text: a byte range and its width.
 pub const Line = struct { start: usize, end: usize, width: f32 };
 
-const FontKey = struct { size_bits: u32, weight: types.Weight, mono: bool, italic: bool, features: u64, tabular: bool, rounded: bool };
+const FontKey = struct { size_bits: u32, weight: types.Weight, mono: bool, italic: bool, tabular: bool, rounded: bool };
 
 fn fontKey(style: types.TextStyle) FontKey {
-    return .{ .size_bits = @bitCast(style.size), .weight = style.weight, .mono = style.mono, .italic = style.italic, .features = @import("font_features.zig").hash(style.features), .tabular = style.tabular, .rounded = style.rounded and !style.mono };
+    return .{ .size_bits = @bitCast(style.size), .weight = style.weight, .mono = style.mono, .italic = style.italic, .tabular = style.tabular, .rounded = style.rounded and !style.mono };
 }
 
 pub const TextSystem = struct {
@@ -68,10 +67,8 @@ pub const TextSystem = struct {
     /// The pictures shown (`ui.image`).
     images: @import("images.zig").Images,
     scale: f32 = 2,
-    fallbacks: @import("font_families.zig").Families = .{},
     last_shape_error: ?[]const u8 = null,
     failed_font: ?cf.CTFontRef = null,
-    cascade_truncated: bool = false,
     fonts: std.AutoHashMapUnmanaged(FontKey, Font) = .empty,
     /// Every font a run used, retained; glyphs refer to them by index.
     run_fonts: std.ArrayList(cf.CTFontRef) = .empty,
@@ -98,7 +95,6 @@ pub const TextSystem = struct {
     pub fn deinit(self: *TextSystem) void {
         self.names.deinit(self.gpa);
         if (self.failed_font) |ref| cf.CFRelease(ref);
-        self.fallbacks.deinit(self.gpa);
         self.images.deinit();
         var fit = self.fonts.valueIterator();
         while (fit.next()) |f| cf.CFRelease(f.ref);
@@ -173,10 +169,6 @@ pub const TextSystem = struct {
         self.dropCaches();
     }
 
-    pub fn setFallbacks(self: *TextSystem, names: []const []const u8) !void {
-        if (try self.fallbacks.set(self.gpa, names)) self.dropCaches();
-    }
-
     /// A line's height in `style`, its leading applied.
     pub fn lineHeight(self: *TextSystem, style: types.TextStyle) f32 {
         if (style.line_height > 0) return style.line_height * self.zoom;
@@ -212,19 +204,12 @@ pub const TextSystem = struct {
         var plain = fonts.create(if (style.mono) self.mono_family else self.family, style.size * self.zoom, style.weight, style.italic, style.mono);
         if (style.tabular) plain = fonts.tabular(plain);
         if (fk.rounded) plain = fonts.rounded(plain);
-        const modified = @import("font_features_mac.zig").applyDetailed(plain, style.features, self.fallbacks.items) catch |err| failed: {
-            self.last_shape_error = @errorName(err);
-            break :failed null;
-        };
-        const ref = if (modified) |value| value.font else plain;
-        if (modified) |value| self.cascade_truncated = self.cascade_truncated or value.cascade.truncated;
-        if (modified != null) cf.CFRelease(plain);
+        const ref = plain;
         const f: Font = .{
             .ref = ref,
             .ascent = @floatCast(CTFontGetAscent(ref)),
             .descent = @floatCast(CTFontGetDescent(ref)),
             .leading = @floatCast(CTFontGetLeading(ref)),
-            .features_applied = modified != null,
         };
         self.fonts.put(self.gpa, fk, f) catch {
             if (self.failed_font) |old| cf.CFRelease(old);
@@ -239,8 +224,6 @@ pub const TextSystem = struct {
         h.update(s);
         h.update(std.mem.asBytes(&style.size));
         h.update(std.mem.asBytes(&style.mono_scale));
-        const features = @import("font_features.zig").hash(style.features);
-        h.update(std.mem.asBytes(&features));
         h.update(&.{ @backingInt(style.weight), @intFromBool(style.mono), @intFromBool(style.italic), @intFromBool(style.tabular), @intFromBool(style.rounded) });
         h.update(std.mem.asBytes(&style.tracking));
         return h.final();
@@ -303,39 +286,14 @@ pub const TextSystem = struct {
     }
 
     fn shape(self: *TextSystem, s: []const u8, style: types.TextStyle) !Layout {
-        if (style.features.len == 0 and !style.tabular and s.len <= 256) if (try self.shapeFast(s, style)) |l| return l;
+        if (!style.tabular and s.len <= 256) if (try self.shapeFast(s, style)) |l| return l;
         const ln = self.line(s, style);
         defer cf.CFRelease(ln);
         return self.glyphsOf(ln, s);
     }
 
-    pub fn gridLayout(self: *TextSystem, s: []const u8, style: types.TextStyle, cells: []const @import("grid_text.zig").Cell, cw: f32) !Layout {
-        return @import("grid_text.zig").layout(self, s, style, cells, cw);
-    }
-
-    /// Full CoreText shaping, with each cluster anchored to its VT cell's
-    /// actual caret origin. No ASCII table or guessed character advance.
-    pub fn shapeGrid(self: *TextSystem, s: []const u8, style: types.TextStyle, cells: []const @import("grid_text.zig").Cell, cw: f32) !Layout {
-        const grid = @import("grid_text.zig");
-        if (!self.font(style).features_applied) return error.FontSettingsUnavailable;
-        const ln = self.line(s, style);
-        defer cf.CFRelease(ln);
-        var result = try self.glyphsOfLimit(ln, s, grid.max_glyphs);
-        errdefer self.gpa.free(result.glyphs);
-        for (@constCast(result.glyphs)) |*item| {
-            const at = try grid.owner(cells, item.index);
-            const caret = cf.CTLineGetOffsetForStringIndex(ln, cf.utf16Offset(s, cells[at].byte_start), null);
-            item.x += @as(f32, @floatFromInt(cells[at].col)) * cw - @as(f32, @floatCast(caret));
-        }
-        result.width = grid.width(cells, cw);
-        return result;
-    }
-
     /// The glyphs of a shaped line of `s`, with byte offsets.
     pub fn glyphsOf(self: *TextSystem, ln: cf.CTLineRef, s: []const u8) !Layout {
-        return self.glyphsOfLimit(ln, s, std.math.maxInt(usize));
-    }
-    fn glyphsOfLimit(self: *TextSystem, ln: cf.CTLineRef, s: []const u8, limit: usize) !Layout {
         const w: f32 = @floatCast(cf.CTLineGetTypographicBounds(ln, null, null, null));
         var glyphs: std.ArrayList(Glyph) = .empty;
         errdefer glyphs.deinit(self.gpa);
@@ -359,7 +317,6 @@ pub const TextSystem = struct {
             const run = CFArrayGetValueAtIndex(runs, r);
             const count: usize = @intCast(CTRunGetGlyphCount(run));
             if (count == 0) continue;
-            if (count > limit - glyphs.items.len) return error.GridGlyphLimit;
             const run_font = CFDictionaryGetValue(CTRunGetAttributes(run), cf.kCTFontAttributeName) orelse continue;
             const fid = self.fontId(@ptrCast(run_font));
             if (fid == 0xffff) return error.RunFontUnavailable;

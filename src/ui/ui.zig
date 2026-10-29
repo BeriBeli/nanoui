@@ -60,12 +60,6 @@ pub const Style = types.Style;
 pub const Pulse = types.Pulse;
 pub const TextStyle = types.TextStyle;
 pub const Truncate = types.Truncate;
-pub const FontFeature = @import("font_features.zig").Feature;
-pub const gridText = @import("grid_text.zig");
-pub const CpuDamage = @import("damage.zig");
-pub const FontSources = @import("tt/font_sources.zig");
-pub const raster = @import("raster.zig");
-pub const gpu = @import("gpu.zig");
 pub const Shadow = types.Shadow;
 pub const Glass = types.Glass;
 pub const Weight = types.Weight;
@@ -135,6 +129,8 @@ pub const ScrollPhase = @import("input.zig").ScrollPhase;
 /// Offscreen pixels a CPU window reuses (`canvas.zig`).
 pub const PixelCanvas = @import("canvas.zig").Canvas;
 /// CPU raster (Linux/Windows). `raster.shapes.shadow_samples` is 8 to match Metal.
+pub const raster = @import("raster.zig");
+
 /// What a window of native UI shows: `build` runs on every frame.
 pub const View = struct {
     ptr: *anyopaque,
@@ -222,10 +218,14 @@ test {
     _ = @import("damage_volatile_check.zig");
 }
 
-test {
-    _ = @import("tt/cluster_fallback_check.zig");
+test "bounded CPU damage regressions" {
+    try std.testing.expect(try @import("damage.zig").check(std.testing.allocator) > 0);
 }
 
-test "bounded CPU damage regressions" {
-    try std.testing.expect(try CpuDamage.check(std.testing.allocator) > 0);
+test {
+    _ = @import("x11_workload_check.zig");
+}
+
+test {
+    _ = @import("api_contract_check.zig");
 }

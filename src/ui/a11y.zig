@@ -222,7 +222,7 @@ fn elemPress(obj: objc.Object, _: objc.SEL) callconv(.c) objc.BOOL {
     s.ctx.input.mouse = .{ .x = r.x + r.w * 0.5, .y = r.y + r.h * 0.5 };
     s.ctx.updateHot();
     s.ctx.input.click_count = 1;
-    s.ctx.input.mouse_button = 1;
+    s.ctx.input.button = .left;
     s.ctx.pointerDown();
     s.frame();
     s.ctx.pointerUp();

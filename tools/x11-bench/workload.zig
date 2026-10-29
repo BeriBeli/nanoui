@@ -75,32 +75,30 @@ test "input is acknowledged and workloads render offscreen without animation" {
     }
 }
 
-test "idle leaves pixels unchanged and small workload damages only its patch" {
+// Use upstream's public CPU canvas to verify the actual workload. The
+// framework separately checks its private bounded backing against full draws.
+test "idle workload stays unchanged and small mode changes only its patch" {
     var s: State = .{ .mode = .small };
     defer s.field.deinit();
     var t: ui.Tester = undefined;
     try t.init(std.testing.allocator, .init(&s, State.view), .{ .width = 1100, .height = 720, .scale = 1 });
     defer t.deinit();
     t.settle(0);
-    var backing: ui.CpuDamage.Surface = .{};
+    var backing: ui.PixelCanvas = .{};
     defer backing.deinit(std.testing.allocator);
     const Adapter = struct {
-        fn draw(tester: *ui.Tester, cpu: *ui.CpuDamage.Surface) !ui.CpuDamage.Damage {
-            return (try cpu.render(std.testing.allocator, tester.instances.items, tester.text.atlas.mask(), tester.text.images.pictures(), .{
-                .width = 1100,
-                .height = 720,
-                .scale = 1,
-                .clear = ui.gpu.color4(tester.theme.background),
-                .glyph_generation = tester.text.atlas.generation,
-                .image_generation = tester.text.images.generation,
-            })).damage;
+        fn draw(cpu: *ui.PixelCanvas, tester: *ui.Tester) void {
+            cpu.draw(std.testing.allocator, .{ .instances = tester.instances.items, .text = &tester.text, .size = tester.size, .scale = tester.scale, .clear = tester.theme.background });
+        }
+        fn damage(cpu: *ui.PixelCanvas, tester: *ui.Tester) ?[4]usize {
+            return cpu.damage(.{ .instances = tester.instances.items, .text = &tester.text, .size = tester.size, .scale = tester.scale, .clear = tester.theme.background });
         }
     };
-    try std.testing.expect(try Adapter.draw(&t, &backing) == .full);
+    Adapter.draw(&backing, &t);
     t.frame();
-    try std.testing.expect(try Adapter.draw(&t, &backing) == .none);
+    try std.testing.expect(Adapter.damage(&backing, &t) == null);
     s.step += 1;
     t.frame();
-    const small = (try Adapter.draw(&t, &backing)).rect;
-    try std.testing.expect(small.width <= 36 and small.height <= 28);
+    const changed = Adapter.damage(&backing, &t).?;
+    try std.testing.expect(changed[2] - changed[0] <= 36 and changed[3] - changed[1] <= 28);
 }

@@ -135,8 +135,6 @@ pub const Surface = struct {
         if (self.dead or self.size.w <= 0 or self.size.h <= 0) return;
         @import("frame_schedule.zig").consume(gtk, &self.idle);
         const c = &self.ctx;
-        const screen = gtk.v3.gtk_widget_get_screen(self.area);
-        c.points_to_logical = @import("typography.zig").pointsToLogical(gtk.v3.gdk_screen_get_resolution(screen));
         const now = clock.now();
         const dt: f32 = if (self.last_frame_time > 0) @floatCast(@min(now - self.last_frame_time, 0.1)) else 1.0 / 60.0;
         self.last_frame_time = now;
@@ -323,7 +321,7 @@ fn onPress(w: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int 
     var button: c_uint = 0;
     _ = gtk.v3.gdk_event_get_button(e, &button);
     if (button < 1 or button > 3) return 0;
-    s.ctx.input.mouse_button = @import("../ui/input.zig").gtkButton(button);
+    s.ctx.input.button = (@import("../ui/pointer_input.zig").gtkButton(button) orelse return 0);
     s.setMouse(e);
     s.ctx.updateHot();
     if (button != 1) {
@@ -355,7 +353,7 @@ fn onRelease(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_in
     var button: c_uint = 0;
     _ = gtk.v3.gdk_event_get_button(e, &button);
     if (button < 1 or button > 3) return 0;
-    s.ctx.input.mouse_button = @import("../ui/input.zig").gtkButton(button);
+    s.ctx.input.button = (@import("../ui/pointer_input.zig").gtkButton(button) orelse return 0);
     s.setMouse(e);
     s.ctx.updateHot();
     if (button != 1) {
@@ -419,7 +417,6 @@ fn onScroll(_: *gtk.Widget, e: *gtk.Event, data: ?*anyopaque) callconv(.c) c_int
         s.ctx.updateHot();
     } else if (s.ctx.wants_wheel) {
         s.ctx.input.scroll = .{ .x = horizontal, .y = delta };
-        s.ctx.input.scroll_lines = lines;
         s.frame();
     }
     return 1;

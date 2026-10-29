@@ -341,7 +341,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
         if (it.rect) |r| {
             const local_x = c.input.mouse.x - r.x - pad_x + e.scroll_x;
             const local_y = c.input.mouse.y - r.y - pad_y + e.scroll_y;
-            if (multi and ((c.input.pressed and c.input.mouse_button == 1 and !c.input.ctrl and it.hovered) or (e.selecting and c.input.down))) {
+            if (multi and ((c.input.pressed and c.input.button == .left and !c.input.ctrl and it.hovered) or (e.selecting and c.input.down))) {
                 const at = lines_mod.indexAtPoint(c, buffer.text(), style, lines_mod.layout(c, buffer.text(), style, wrap_w), c.input.mouse.x - r.x - pad_x, local_y, lh_);
                 e.caret = at;
                 if (c.input.pressed) {
@@ -354,7 +354,7 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
                     c.selection.blocked = true;
                     e.selecting = true;
                 }
-            } else if (c.input.pressed and c.input.mouse_button == 1 and !c.input.ctrl and it.hovered) {
+            } else if (c.input.pressed and c.input.button == .left and !c.input.ctrl and it.hovered) {
                 const idx = c.text.indexAt(shownOf(buffer.text(), opts.password, bullets), style, local_x);
                 const at = if (opts.password) byteOfCodepoint(buffer.text(), idx / 3) else idx;
                 textedit.pointerSelect(c, e, buffer.text(), at, false);

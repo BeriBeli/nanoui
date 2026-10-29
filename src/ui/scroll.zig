@@ -145,7 +145,7 @@ fn scrubTo(c: *Context, id: u64, g: ScrollbarGeom, thumb_top: f32) void {
 }
 
 pub fn tryPressScrollbar(c: *Context) bool {
-    if (c.input.mouse_button != 1 or c.input.ctrl) return false;
+    if (c.input.button != .left or c.input.ctrl) return false;
     const m = c.input.mouse;
     var it = c.scrollbars.iterator();
     while (it.next()) |e| {

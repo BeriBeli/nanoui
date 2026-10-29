@@ -8,7 +8,6 @@ const types = @import("types.zig");
 const fontdb = @import("tt/fontdb.zig");
 const tt = @import("tt/font.zig");
 const atlas_mod = @import("atlas_tt.zig");
-const grid = @import("grid_text.zig");
 const utf8 = @import("utf8.zig");
 pub const rich = @import("rich_tt.zig");
 
@@ -42,7 +41,6 @@ fn fontKey(style: types.TextStyle) FontKey {
 
 fn weightOf(w: types.Weight) u16 {
     return switch (w) {
-        .light => 300,
         .regular => 400,
         .medium => 500,
         .semibold => 600,
@@ -69,7 +67,6 @@ pub const TextSystem = struct {
     mono_family: ?[]const u8 = null,
     /// Every size times this (`Context.setZoom`).
     zoom: f32 = 1,
-    run_shaper: ?grid.Shaper = null,
     last_shape_error: ?[]const u8 = null,
 
     pub fn init(gpa: std.mem.Allocator) TextSystem {
@@ -78,7 +75,6 @@ pub const TextSystem = struct {
 
     pub fn deinit(self: *TextSystem) void {
         self.names.deinit(self.gpa);
-        if (self.run_shaper) |shaper| if (shaper.deinit) |release| release(shaper.context, self.gpa);
         self.images.deinit();
         self.fonts.deinit(self.gpa);
         self.run_fonts.deinit(self.gpa);
@@ -118,17 +114,6 @@ pub const TextSystem = struct {
         freeLayouts(self.gpa, &self.previous);
         self.wraps.clear(self.gpa);
         self.atlas.reset();
-    }
-
-    pub fn setFallbacks(self: *TextSystem, names: []const []const u8) !void {
-        if (try self.db.setFallbacks(names)) self.dropCaches();
-    }
-
-    pub fn setRunShaper(self: *TextSystem, shaper: grid.Shaper) void {
-        if (self.run_shaper) |old| if (old.context == shaper.context and old.shape == shaper.shape) return;
-        if (self.run_shaper) |old| if (old.deinit) |release| release(old.context, self.gpa);
-        self.run_shaper = shaper;
-        self.dropCaches();
     }
 
     /// Scales every text by `z`: a change drops every cached font, shaping and wrap.
@@ -205,8 +190,6 @@ pub const TextSystem = struct {
     pub fn key(s: []const u8, style: types.TextStyle, extra: u64) u64 {
         var h = std.hash.Wyhash.init(extra);
         h.update(s);
-        const settings = @import("font_features.zig").hash(style.features);
-        h.update(std.mem.asBytes(&settings));
         h.update(std.mem.asBytes(&style.size));
         h.update(std.mem.asBytes(&style.mono_scale));
         h.update(&.{ @backingInt(style.weight), @intFromBool(style.mono), @intFromBool(style.italic), @intFromBool(style.tabular) });
@@ -245,53 +228,6 @@ pub const TextSystem = struct {
             return .{ .width = l.width, .glyphs = &.{} };
         };
         return l;
-    }
-
-    pub fn gridLayout(self: *TextSystem, s: []const u8, style: types.TextStyle, cells: []const grid.Cell, cw: f32) !Layout {
-        return grid.layout(self, s, style, cells, cw);
-    }
-
-    /// A VT grapheme is assigned one face, then adjacent same-face graphemes
-    /// are shaped together. Glyph IDs and raster faces always share source bytes.
-    pub fn shapeGrid(self: *TextSystem, s: []const u8, style: types.TextStyle, cells: []const grid.Cell, cw: f32) !Layout {
-        const shaper = self.run_shaper orelse return error.GridShaperUnavailable;
-        const f = self.font(style);
-        if (f.id == 0xffff) return error.MissingPrimaryFont;
-        const primary = self.run_faces.items[f.id];
-        var faces: [grid.max_cells]u32 = undefined;
-        for (cells, 0..) |cell, i| faces[i] = self.db.clusterFace(primary, s[cell.byte_start..cell.byte_end], f.weight, style.italic) orelse return error.MissingClusterFont;
-        var out: std.ArrayList(Glyph) = .empty;
-        errdefer out.deinit(self.gpa);
-        var start: usize = 0;
-        while (start < cells.len) {
-            var end = start + 1;
-            while (end < cells.len and faces[end] == faces[start]) : (end += 1) {}
-            const face = faces[start];
-            const id = self.runFont(face, style.size * self.zoom, style.italic, f.weight);
-            if (id == 0xffff) return error.RunFontUnavailable;
-            const source = self.db.source(face) orelse return error.FontSourceUnavailable;
-            const offset = cells[start].byte_start;
-            const segment = try self.gpa.alloc(grid.Cell, end - start);
-            defer self.gpa.free(segment);
-            for (segment, cells[start..end]) |*dst, cell| dst.* = .{ .byte_start = cell.byte_start - offset, .byte_end = cell.byte_end - offset, .col = cell.col, .width = cell.width };
-            const shaped = try shaper.shape(shaper.context, self.gpa, .{
-                .source = .{ .bytes = source.bytes, .index = source.index, .digest = source.digest },
-                .text = s[offset..cells[end - 1].byte_end],
-                .cells = segment,
-                .features = style.features,
-                .physical_px = style.size * self.zoom * self.scale,
-                .scale = self.scale,
-                .cell_width = cw,
-            });
-            defer self.gpa.free(shaped);
-            if (shaped.len > grid.max_glyphs - out.items.len) return error.GridGlyphLimit;
-            for (shaped) |item| {
-                if (item.glyph > std.math.maxInt(u16)) return error.InvalidGlyphId;
-                try out.append(self.gpa, .{ .font = id, .glyph = @intCast(item.glyph), .index = offset + item.index, .x = item.x, .y = item.y });
-            }
-            start = end;
-        }
-        return .{ .width = grid.width(cells, cw), .glyphs = try out.toOwnedSlice(self.gpa) };
     }
 
     /// Shapes `s` in `style` from pen position `x0`, appending its glyphs
@@ -450,14 +386,4 @@ test "a character cut off at a string's end is shaped, not decoded short" {
     // "a→" with the arrow's last byte gone, as a span can end.
     const w = ts.width("a\xe2\x86", .{ .size = 13 });
     try std.testing.expect(w > 0);
-}
-
-test "Light requests a real 300-weight face and keeps its own font cache entry" {
-    var text = TextSystem.init(std.testing.allocator);
-    defer text.deinit();
-    const light = text.font(.{ .weight = .light, .size = 13 });
-    const regular = text.font(.{ .weight = .regular, .size = 13 });
-    try std.testing.expectEqual(@as(u16, 300), light.weight);
-    try std.testing.expectEqual(@as(u16, 400), regular.weight);
-    try std.testing.expectEqual(@as(usize, 2), text.fonts.count());
 }

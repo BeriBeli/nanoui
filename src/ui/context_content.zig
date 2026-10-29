@@ -10,7 +10,6 @@ pub const Content = union(enum) {
     texture: Texture,
     /// What a canvas draws (`ui.canvas`), at points within its box.
     canvas: *const @import("draw.zig").Canvas,
-    glyph_run: GlyphRun,
 
     /// One of this frame's textures (`Context.textures`), the part `uv`
     /// (0 to 1) of it shown.
@@ -18,15 +17,6 @@ pub const Content = union(enum) {
         slot: u32,
         uv: [4]f32 = .{ 0, 0, 1, 1 },
         opacity: f32 = 1,
-    };
-
-    /// Already shaped, grid-positioned glyphs, borrowed until frame completion.
-    pub const GlyphRun = struct {
-        str: []const u8,
-        cells: []const @import("grid_text.zig").Cell,
-        glyphs: []const text.Glyph,
-        color: types.Color,
-        baseline: f32,
     };
 
     /// A picture: its key in the image atlas, and its bytes for the first

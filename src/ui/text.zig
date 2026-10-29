@@ -23,8 +23,6 @@ pub const Atlas = impl.Atlas;
 pub const Sprite = impl.Sprite;
 pub const subpixel_bins = impl.subpixel_bins;
 pub const rich = impl.rich;
-pub const grid = @import("grid_text.zig");
-pub const FontFeature = @import("font_features.zig").Feature;
 
 pub const ellipsis = "…";
 const fits_head = std.math.maxInt(u32);

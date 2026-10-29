@@ -33,7 +33,7 @@ pub fn run(c: *Context, view: View, ts: *text.TextSystem, instances: *std.ArrayL
     @import("scroll.zig").updateScrollbarDrag(c);
 
     const t0 = now();
-    if (c.input.pressed and c.input.mouse_button == 1) c.selection.pressed = true;
+    if (c.input.pressed and c.input.button == .left) c.selection.pressed = true;
     c.copy_done = false;
     c.copy_requested = false;
     for (c.input.ops) |op| if (op == .command and op.command == .copy) {
