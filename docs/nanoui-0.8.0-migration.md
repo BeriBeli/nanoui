@@ -59,6 +59,10 @@ that a hidden frame has already allocated a GPU atlas.
 The standalone X11 benchmark also releases its new growable `TextBuffer`
 when the owning process fixture or test state ends.
 
+The [macOS presentation follow-up](macos-presentation.md) rejects stale-size
+drawables, restores transaction-owned resize presentation, and separates UI
+wake deadlines from display cadence.
+
 ## Verification scope
 
 The migration adds regressions for transform-only damage, rotated glyph/image/

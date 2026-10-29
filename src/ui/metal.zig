@@ -94,7 +94,7 @@ pub const Renderer = struct {
         objc.msg(void, layer, "setPixelFormat:", .{pixel_format});
         // Framebuffer-only until a pane of glass needs to read the backdrop.
         objc.msg(void, layer, "setFramebufferOnly:", .{objc.YES});
-        // Three drawables managed by CAMetalDisplayLink.
+        // Three drawable buffers; the surface acquires only when it renders.
         objc.msg(void, layer, "setMaximumDrawableCount:", .{@as(objc.NSUInteger, 3)});
         objc.msg(void, layer, "setOpaque:", .{objc.YES});
         // A frame waits for a drawable rather than being dropped: a dropped
@@ -208,7 +208,7 @@ pub const Renderer = struct {
         if (objc.dispatch_semaphore_wait(self.in_flight, dispatch_time(0, std.time.ns_per_s)) != 0) {
             return .{ .drawable_wait_ms = (cf.CACurrentMediaTime() - t0) * 1000, .sync = self.live_resize };
         }
-        const drawable = given orelse {
+        const drawable = given orelse objc.msg(?objc.Object, self.layer, "nextDrawable", .{}) orelse {
             _ = objc.dispatch_semaphore_signal(self.in_flight);
             return .{ .drawable_wait_ms = (cf.CACurrentMediaTime() - t0) * 1000, .sync = self.live_resize };
         };
@@ -218,6 +218,16 @@ pub const Renderer = struct {
             _ = objc.dispatch_semaphore_signal(self.in_flight);
             return .{ .drawable_wait_ms = (t1 - t0) * 1000, .sync = sync };
         };
+        // A display link can have acquired this drawable before a resize or
+        // occlusion recovery. Keep the previous onscreen frame until a target
+        // matching the layer's current size arrives; never stretch a 1x1 one.
+        const desired = objc.msg(objc.CGSize, self.layer, "drawableSize", .{});
+        if (@as(f64, @floatFromInt(objc.msg(objc.NSUInteger, texture, "width", .{}))) != desired.width or
+            @as(f64, @floatFromInt(objc.msg(objc.NSUInteger, texture, "height", .{}))) != desired.height)
+        {
+            _ = objc.dispatch_semaphore_signal(self.in_flight);
+            return .{ .drawable_wait_ms = (t1 - t0) * 1000, .sync = sync };
+        }
         // The slot's last frame is done: its pixel buffers can go.
         const held = &self.held[self.next_buffer];
         self.frame_textures.release(held);

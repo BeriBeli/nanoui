@@ -135,7 +135,6 @@ pub const ScrollPhase = @import("input.zig").ScrollPhase;
 /// Offscreen pixels a CPU window reuses (`canvas.zig`).
 pub const PixelCanvas = @import("canvas.zig").Canvas;
 /// CPU raster (Linux/Windows). `raster.shapes.shadow_samples` is 8 to match Metal.
-
 /// What a window of native UI shows: `build` runs on every frame.
 pub const View = struct {
     ptr: *anyopaque,
@@ -211,6 +210,9 @@ test {
     _ = @import("tests_input.zig");
     _ = @import("tests_backtab.zig");
     if (@import("builtin").os.tag == .macos) {
+        _ = @import("tests_drawable_size.zig");
+        _ = @import("tests_surface_resize.zig");
+        _ = @import("tests_surface_pacing.zig");
         _ = @import("tests_menu.zig");
         _ = @import("tests_a11y.zig");
     }

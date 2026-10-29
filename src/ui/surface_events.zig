@@ -9,6 +9,7 @@ const textinput = @import("textinput.zig");
 const a11y = @import("a11y.zig");
 const input = @import("input.zig");
 const Surface = @import("surface.zig").Surface;
+const display = @import("surface_display.zig");
 
 pub const methods = [_]objc.Method{
     .{ .name = "isFlipped", .imp = &yes, .types = "c@:" },
@@ -38,17 +39,19 @@ pub const methods = [_]objc.Method{
     .{ .name = "performDragOperation:", .imp = &performDragOperation, .types = "c@:@" },
     // Updates on movement only: nothing polls.
     .{ .name = "wantsPeriodicDraggingUpdates", .imp = &no, .types = "c@:" },
-    .{ .name = "setFrameSize:", .imp = &setFrameSize, .types = "v@:{CGSize=dd}" },
-    .{ .name = "viewDidChangeBackingProperties", .imp = &backingChanged, .types = "v@:" },
+    .{ .name = "setFrameSize:", .imp = &display.setFrameSize, .types = "v@:{CGSize=dd}" },
+    .{ .name = "viewDidChangeBackingProperties", .imp = &display.backingChanged, .types = "v@:" },
     .{ .name = "viewDidChangeEffectiveAppearance", .imp = &appearanceChanged, .types = "v@:" },
     .{ .name = "accessibilityChanged:", .imp = &accessibilityChanged, .types = "v@:@" },
     .{ .name = "updateTrackingAreas", .imp = &updateTrackingAreas, .types = "v@:" },
     .{ .name = "cursorUpdate:", .imp = &cursorUpdate, .types = "v@:@" },
     .{ .name = "resetCursorRects", .imp = &resetCursorRects, .types = "v@:" },
     .{ .name = "draggingSession:sourceOperationMaskForDraggingContext:", .imp = &draggingSourceMask, .types = "Q@:@q" },
-    .{ .name = "metalDisplayLink:needsUpdate:", .imp = &metalDisplayLinkNeedsUpdate, .types = "v@:@@" },
-    .{ .name = "viewWillStartLiveResize", .imp = &liveResizeStart, .types = "v@:" },
-    .{ .name = "viewDidEndLiveResize", .imp = &liveResizeEnd, .types = "v@:" },
+    .{ .name = "displayLinkFired:", .imp = &display.linkFired, .types = "v@:@" },
+    .{ .name = "displayLayer:", .imp = &display.layerDisplay, .types = "v@:@" },
+    .{ .name = "frameTimerFired:", .imp = &@import("surface_pacing.zig").timerFired, .types = "v@:@" },
+    .{ .name = "viewWillStartLiveResize", .imp = &display.liveResizeStart, .types = "v@:" },
+    .{ .name = "viewDidEndLiveResize", .imp = &display.liveResizeEnd, .types = "v@:" },
 } ++ textinput.methods ++ a11y.methods;
 
 /// What drags from other apps may bring.
@@ -450,53 +453,6 @@ fn performDragOperation(obj: objc.Object, _: objc.SEL, info: objc.Object) callco
     s.frame();
     s.ctx.input.drop = null;
     return if (s.ctx.acceptsDropAt(p)) objc.YES else objc.NO;
-}
-
-fn metalDisplayLinkNeedsUpdate(obj: objc.Object, _: objc.SEL, _: objc.Object, update: objc.Object) callconv(.c) void {
-    const s = surfaceOf(obj) orelse return;
-    if (s.dead or s.in_frame) return;
-    const target = objc.msg(f64, update, "targetPresentationTimestamp", .{});
-    const frame_in_due = s.ctx.frame_in != null and target >= s.frame_in_due - 0.001;
-    if (!s.full_pending and !frame_in_due and !s.ctx.animating and !s.in_live_resize and !s.geometry_changed and !s.retained_ready and !s.pending_sync and s.ctx.time_driven == .none) {
-        s.updatePacing(target, false);
-        return;
-    }
-    const drawable = objc.msg(?objc.Object, update, "drawable", .{}) orelse return;
-    const duration: f64 = if (s.link_fps > 0) 1.0 / @as(f64, s.link_fps) else 1.0 / @as(f64, @max(60.0, s.max_fps));
-    s.renderer.given_drawable = drawable;
-    defer s.renderer.given_drawable = null;
-    if (!s.full_pending and !frame_in_due and !s.ctx.animating and !s.in_live_resize and !s.geometry_changed and (s.retained_ready or (!s.pending_sync and s.ctx.time_driven != .none))) {
-        s.redrawRetained(target, duration);
-        return;
-    }
-    s.frameAt(.link, target, duration);
-}
-
-fn liveResizeStart(obj: objc.Object, _: objc.SEL) callconv(.c) void {
-    objc.msgSuper(void, obj, objc.class("NSView"), "viewWillStartLiveResize", .{});
-    const s = surfaceOf(obj) orelse return;
-    s.in_live_resize = true;
-    s.renderer.setLiveResize(true);
-}
-
-fn liveResizeEnd(obj: objc.Object, _: objc.SEL) callconv(.c) void {
-    objc.msgSuper(void, obj, objc.class("NSView"), "viewDidEndLiveResize", .{});
-    const s = surfaceOf(obj) orelse return;
-    s.in_live_resize = false;
-    s.frame();
-}
-
-fn setFrameSize(obj: objc.Object, _: objc.SEL, size: objc.CGSize) callconv(.c) void {
-    objc.msgSuper(void, obj, objc.class("NSView"), "setFrameSize:", .{size});
-    const s = surfaceOf(obj) orelse return;
-    s.updateGeometry();
-    s.frame();
-}
-
-fn backingChanged(obj: objc.Object, _: objc.SEL) callconv(.c) void {
-    const s = surfaceOf(obj) orelse return;
-    s.updateGeometry();
-    s.frame();
 }
 
 fn appearanceChanged(obj: objc.Object, _: objc.SEL) callconv(.c) void {
